@@ -33,6 +33,23 @@ endif()
 if(EXISTS "${REPO_ROOT}/build-rv64/ruy")
   include_directories("${REPO_ROOT}/build-rv64/ruy")
 endif()
+# integer_ops/depthwise_conv.h transitively pulls in cpu_backend_context.h →
+# public/gemmlowp.h. That ships in the rv64 build dir.
+if(EXISTS "${REPO_ROOT}/build-rv64/gemmlowp")
+  include_directories("${REPO_ROOT}/build-rv64/gemmlowp")
+endif()
+if(EXISTS "${REPO_ROOT}/build-rv64/abseil-cpp")
+  include_directories("${REPO_ROOT}/build-rv64/abseil-cpp")
+endif()
+if(EXISTS "${REPO_ROOT}/build-rv64/eigen")
+  include_directories("${REPO_ROOT}/build-rv64/eigen")
+endif()
+if(EXISTS "${REPO_ROOT}/build-rv64/flatbuffers/include")
+  include_directories("${REPO_ROOT}/build-rv64/flatbuffers/include")
+endif()
 
 add_executable(depthwise_float_accuracy_test depthwise_float_accuracy_test.cc)
 target_compile_options(depthwise_float_accuracy_test PRIVATE -O3 -Wall)
+
+add_executable(depthwise_int8_accuracy_test depthwise_int8_accuracy_test.cc)
+target_compile_options(depthwise_int8_accuracy_test PRIVATE -O3 -Wall)

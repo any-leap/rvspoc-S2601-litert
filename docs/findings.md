@@ -233,6 +233,29 @@
   3. EfficientDet 的 ADD/Detection PostProcess — 即使全部归零也只省 0.5%
 - #baseline #profile #int8 #cross-model
 
+## FIND-010 [coverage] integer_ops/depthwise_conv.h RVV 100%（22/22）+ EfficientDet 2.23×
+
+- 日期：2026-05-05
+- 范围：`tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h` 的 22 个 Neon spec
+- 实现：
+  - 同 FP32 的两 helper 模式：`RvvDepthwiseInt8DepthMult1Run` + `RvvDepthwiseInt8DynamicDepthMultRun`
+  - 关键 RVV 指令：`vsext_vf2` (i8→i16 sign extend) + `vadd_vx_i16m2` (broadcast input_offset) + `vwmacc_vv_i32m4` (i16×i16→i32 widening MAC，single instruction)
+  - LMUL 编排：i8m1 / i16m2 / i32m4 同 EMUL，单次 vsetvl 给所有 load 用同一个 vl
+  - 22 个 specialization 共用 ~80 LOC helper + 22 个宏定义的 forwarder（vs Neon ~1700 LOC）
+- 结果：
+
+  | 模型 | DEPTHWISE 改前 ms | 改后 ms | Δ |
+  |---|---|---|---|
+  | mobilenet_v1 INT8 | 867 | 858 | ~0% **(走的不是这条路！)** |
+  | mobilenet_v2 INT8 | 1 023 | 1 024 | ~0% **(走的不是这条路！)** |
+  | efficientdet_lite0 | 3 252 | **1 459** | **-55%（2.23×）** ✓ |
+
+- 重要发现：MobileNet 的 INT8 .tflite（2018 版）用的是**老 uint8 quantization**，dispatch 到 `optimized_ops::DepthwiseConv<uint8, int32>`（在 `depthwiseconv_uint8.h`），**不**走我们改的这个 `integer_ops/depthwise_conv.h`（per-channel int8）。EfficientDet 是较新的 per-channel int8 quant，所以才吃到了 2.23×
+- 工程含义：要 cover MobileNet INT8 的 depthwise，得**单独再做一遍** `depthwiseconv_uint8.h`（2127 LOC，uint8 数学和 i8 略有差别）。这是 Task 13 的范围
+- 测试：`test/rvv/depthwise_int8_accuracy_test.cc`，16 cases × 3 VLEN = 48 runs，**全部 max_abs_diff=0（整数完全一致）**
+- 满足 spec：INT8 算子级误差 ≤ 1 LSB → 实际 0 LSB ✓
+- #coverage #int8 #efficientdet #depthwise
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
