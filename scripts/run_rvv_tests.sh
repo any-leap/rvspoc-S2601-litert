@@ -19,7 +19,7 @@ echo
 echo "=== Running tests under qemu (vlen=128, 256, 512) ==="
 for vlen in 128 256 512; do
   echo "--- vlen=$vlen ---"
-  for t in depthwise_float_accuracy_test depthwise_int8_accuracy_test depthwise_uint8_accuracy_test; do
+  for t in depthwise_float_accuracy_test depthwise_int8_accuracy_test depthwise_uint8_accuracy_test gemm_float_accuracy_test; do
     echo "  > $t"
     qemu-riscv64-static -cpu "rv64,v=true,vlen=$vlen,elen=64" \
       -L /usr/riscv64-linux-gnu \

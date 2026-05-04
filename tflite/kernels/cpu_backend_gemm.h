@@ -23,6 +23,9 @@ limitations under the License.
 #include "tflite/kernels/cpu_backend_gemm_custom_gemv.h"
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
+// RVSPOC S2601: RVV-targeted FP32 GEMM partial specialization. Header
+// itself is gated on __riscv_vector so it's a no-op on other targets.
+#include "tflite/kernels/cpu_backend_gemm_rvv.h"
 
 #ifndef TFLITE_WITH_RUY
 #include "tflite/kernels/cpu_backend_gemm_eigen.h"
@@ -68,6 +71,19 @@ template <typename LhsScalar, typename RhsScalar, typename AccumScalar,
           typename DstScalar, QuantizationFlavor quantization_flavor>
 struct GemmImpl : detail::GemmImplUsingRuy<LhsScalar, RhsScalar, AccumScalar,
                                            DstScalar, quantization_flavor> {};
+
+// RVSPOC S2601: override the FP32 GemmImpl on RV64GCV to bypass ruy's
+// scalar StandardCpp fallback (ruy has no upstream RISC-V path). Wraps
+// GemmImplUsingRvv which itself layout-checks and falls back to ruy if
+// the matrix orientations don't match what optimized_ops::Conv emits —
+// so this is safe to override unconditionally.
+#if defined(__riscv_vector)
+template <>
+struct GemmImpl<float, float, float, float,
+                QuantizationFlavor::kFloatingPoint>
+    : detail::GemmImplUsingRvv<float, float, float, float,
+                               QuantizationFlavor::kFloatingPoint> {};
+#endif
 
 #if !defined(TFLITE_WITH_RUY)
 

@@ -279,6 +279,46 @@
   - 加速生效在所有 5 个 spec 模型上（FP32 + INT8 全套）
 - #coverage #uint8 #mobilenet #milestone
 
+## FIND-012 [milestone] RVV FP32 GEMM 拦截 ruy → MobileNetV1 总推理 2.29×
+
+- 日期：2026-05-05
+- 路径：partial-specialize `cpu_backend_gemm::GemmImpl<float,float,float,float,kFloatingPoint>` for `__riscv_vector`，绕开 ruy 的 StandardCpp scalar fallback
+  - 不动 ruy 本身（避免 fork 第三方仓库 + FetchContent 重导）
+  - layout-check 失败时 forward 回 ruy（safety net）
+- 算法：dot-product GEMM（适合 lhs 行连续 / rhs 列连续的 conv 矩阵布局）
+
+  ```
+  for m_idx in [0, m):
+    for n_idx in [0, n):
+      v_acc = 0
+      for k_chunk in [0, k) by vl:    // vsetvl_e32m4
+        v_acc += lhs[n_idx*k + k_chunk : +vl] * rhs[m_idx*k + k_chunk : +vl]
+      acc = vfredusum(v_acc) + bias[n_idx]
+      dst[m_idx*n + n_idx] = clamp(acc)
+  ```
+
+- 文件：
+  - `tflite/kernels/internal/optimized/rvv_gemm_fp32.h`（独立 header-only 核心）
+  - `tflite/kernels/cpu_backend_gemm_rvv.h`（adapter，partial specialization）
+  - `tflite/kernels/cpu_backend_gemm.h`（include + override）
+- 5 个模型 benchmark 对比（QEMU vlen=256，vs 之前 RVV-depthwise-only build）：
+
+  | 模型 | total ms 改前 | 改后 | 总加速 |
+  |---|---|---|---|
+  | mobilenet_v1 FP32 | 15 214 | **6 610** | **2.30×** ⭐ |
+  | mobilenet_v1 INT8 | 14 486 | 14 486 | 1.00×（FP32 only） |
+  | mobilenet_v2 FP32 | 7 571 | **3 851** | **1.97×** ⭐ |
+  | mobilenet_v2 INT8 | 10 931 | 10 931 | 1.00×（FP32 only） |
+  | efficientdet_lite0 INT8 | 31 830 | 31 740 | ~1× |
+
+- vs 项目最初 scalar baseline：mobilenet_v1 FP32 **15 740 → 6 610 ms = 2.38×**
+- 测试：`gemm_float_accuracy_test.cc` 9 cases × 3 VLEN = 27 runs，max relative error 0~1e-5（满足 spec）；max abs error 6.7e-6（pass，spec FP32 ≤1e-5）
+- 接下来还要做：
+  - 给 INT8 GEMM 也做 RVV partial specialization（同手段，i8/u8 path），可继续往上推 MobileNetV1/V2 INT8 + EfficientDet
+  - 加 outer block 提高 cache 命中（lhs 重用，目前每个 m_idx 重读一遍 lhs）
+  - 评估 reference fallback 是否触及（layout 不匹配的情况）
+- #milestone #gemm #ruy-bypass #conv2d
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04

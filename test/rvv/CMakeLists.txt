@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Match the main build (cmake -DTFLITE_ENABLE_RUY=ON): without this define,
+# cpu_backend_gemm.h pulls in alternate Eigen/gemmlowp/x86 specializations
+# that would collide with our RVV partial specialization at compile time.
+add_compile_definitions(TFLITE_WITH_RUY)
+
 # Resolve repo root (..) so we can include both tflite/ and the
 # pre-extracted TF source (for ruy/profiler/instrumentation.h, etc.).
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
@@ -56,3 +61,6 @@ target_compile_options(depthwise_int8_accuracy_test PRIVATE -O3 -Wall)
 
 add_executable(depthwise_uint8_accuracy_test depthwise_uint8_accuracy_test.cc)
 target_compile_options(depthwise_uint8_accuracy_test PRIVATE -O3 -Wall)
+
+add_executable(gemm_float_accuracy_test gemm_float_accuracy_test.cc)
+target_compile_options(gemm_float_accuracy_test PRIVATE -O3 -Wall)
