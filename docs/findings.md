@@ -97,6 +97,35 @@
   - 后续 sync 上游时要注意别覆盖这个 patch
 - #cmake #proto #fork-bug
 
+## FIND-005 [baseline] MobileNetV1 FP32 在 RV64GCV scalar 上 CONV_2D 占 95.2%
+
+- 日期：2026-05-05
+- 测试条件：
+  - 模型：mobilenet_v1_1.0_224.tflite (FP32, ~16 MB)
+  - 编译：`-march=rv64gcv -O3`，TFLITE_ENABLE_RUY=ON，XNNPACK/GPU OFF
+  - 运行：`qemu-riscv64-static -cpu rv64,v=true,vlen=256,elen=64`
+  - 命令：`benchmark_model --num_threads=1 --num_runs=5 --warmup_runs=1 --enable_op_profiling=true`
+- 总推理延迟：**~15.7 s** avg（QEMU emulation，**真硬件预期数量级低**）
+- 算子级分布：
+
+  | 算子 | 次数 | 累计 ms | 占比 |
+  |---|---|---|---|
+  | CONV_2D | 15 | 14 981 | **95.186%** |
+  | DEPTHWISE_CONV_2D | 13 | 757 | 4.807% |
+  | AVERAGE_POOL_2D | 1 | 1.0 | 0.006% |
+  | SOFTMAX | 1 | 0.14 | 0.001% |
+  | SQUEEZE | 1 | 0.03 | 0.000% |
+
+- Top-8 hot kernels（全是 pointwise CONV_2D 1×1，单个 1.36–1.45 s，合计占 71%）：
+  - `Conv2d_3_pointwise`、`Conv2d_5_pointwise`、`Conv2d_7_pointwise`、`Conv2d_8_pointwise`、`Conv2d_9_pointwise`、`Conv2d_10_pointwise`、`Conv2d_11_pointwise`、`Conv2d_13_pointwise`
+- 工程含义：
+  - **优化优先级**: CONV_2D > DEPTHWISE_CONV_2D >> 其它。其它合起来不到 1%，优化它们对赛题 110ms 目标几乎无意义
+  - **Pointwise (1×1) conv 占绝大头**——它本质上是 `im2col + GEMM`，所以底层走的应该是 ruy 的 GEMM 路径，不是 `optimized_ops.h` 的卷积手写汇编
+  - 因此 RVV 优化 ruy 的 GEMM kernel（`ruy/kernel_*.h` / `pack_*.h`）可能比改 LiteRT optimized_ops 更划算
+  - 必须验证：CONV_2D 在 FP32 / INT8 时各走哪条路径——下一步看代码
+- 数据稳定性：std=101 057 μs，5 次跑数据 min=15 667 170 μs / max=15 937 766 μs，差异 <2%
+- #baseline #profile #conv2d #ruy
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
