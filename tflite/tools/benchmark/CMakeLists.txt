@@ -117,3 +117,11 @@ target_include_directories(benchmark_model
 target_link_libraries(benchmark_model
     ${TFLITE_BENCHMARK_LIBS}
 )
+
+# RVSPOC S2601: model output dumper, used to verify end-to-end model
+# numerics by diffing the same model run on RVV vs scalar builds.
+add_executable(rvspoc_model_output_dumper
+  "${TFLITE_SOURCE_DIR}/../test/rvv/model_output_dumper.cc"
+)
+target_link_libraries(rvspoc_model_output_dumper tensorflow-lite)
+target_compile_options(rvspoc_model_output_dumper PRIVATE -O3)

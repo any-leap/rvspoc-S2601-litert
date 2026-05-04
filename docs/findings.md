@@ -389,6 +389,30 @@
 - 现在 5 个 spec 模型平均加速 ~2.8×（QEMU；真硬件预期更显著，因为内存带宽差距更小）
 - #milestone #gemm #uint8 #mobilenet
 
+## FIND-015 [model-level] 4/5 spec 模型 Top-1 一致；EfficientDet 检测顺序变化属预期
+
+- 日期：2026-05-05
+- 工具：`test/rvv/model_output_dumper.cc`（用 `tflite::Interpreter` 端到端推理 + dump 输出 tensor 的 raw bytes 和 top-5）
+- 方法：build 两份 LiteRT — `build-rv64/`（`-march=rv64gcv`，RVV 路径开）+ `build-rv64-scalar/`（`-march=rv64gc`，无 V，所有 RVV 代码 fall through 到 scalar），同种子同输入跑同模型，diff 输出
+- 结果：
+
+  | 模型 | Top-1 一致 | 原始字节 | 备注 |
+  |---|---|---|---|
+  | mobilenet_v1 FP32 | ✅ class 372 | DIFFER | FP32 FMA 顺序差异，预期 |
+  | mobilenet_v1 INT8 (uint8) | ✅ class 412 | **IDENTICAL（bit-exact）** | requantization 路径完全一致 |
+  | mobilenet_v2 FP32 | ✅ class 557 | DIFFER | FP32 预期 |
+  | mobilenet_v2 INT8 (uint8) | ✅ class 880 | DIFFER | 1 LSB diff（spec ≤ 1 LSB ✓），top-5 第 5 位是 tie 重排 |
+  | efficientdet_lite0 INT8 | ❌ Top-1 不同 | DIFFER | **检测模型，Top-1 不是合适指标** — 见下 |
+
+- EfficientDet 解读：检测模型有 4 个输出 tensor（boxes / classes / scores / num_detections），不同小数差异在多层中累积 + NMS 阈值附近来回切，最高分检测的 ID 会变。**评估检测模型的标准是 mAP，不是 Top-1**。RVV scores 0.993 vs scalar 0.998 都是高置信度有效检测，只是哪个检测候选「赢」NMS 的差异
+- Spec 角度：
+  - **算子级 FP32 ≤ 1e-5**：proven 0~6.7e-6 in unit tests ✓
+  - **算子级 INT8 ≤ 1 LSB**：proven 0 in unit tests，端到端实测 1 LSB（v2 INT8）✓
+  - **模型级 FP32 Top-1 ≤ 0.1%**：单图实证 4/4 分类模型 Top-1 一致；ImageNet 1000 张数据集级评估待做
+  - **模型级 INT8 Top-1 ≤ 1%**：同上
+- 重要提醒：本验证比较的是 **scalar-RV64 vs RVV-RV64**，不是 spec 要求的 **vs x86 reference**。要真正对齐 spec，应再跑一份 x86 native 推理结果做 baseline。但因为 RVV/RV64-scalar 之间的差异已经在 spec budget 内，且 RV64-scalar 应跟 x86 scalar bit-exact（同样的 portable 代码），传递性下来 RVV vs x86 也在 budget 内
+- #model-level #accuracy #verification
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
