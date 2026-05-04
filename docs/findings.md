@@ -126,6 +126,36 @@
 - 数据稳定性：std=101 057 μs，5 次跑数据 min=15 667 170 μs / max=15 937 766 μs，差异 <2%
 - #baseline #profile #conv2d #ruy
 
+## FIND-006 [pilot] 第一个 RVV kernel — DEPTHWISE_CONV_2D FP32 提速 2.15×
+
+- 日期：2026-05-05
+- 算子：`FloatDepthwiseConvKernel<true, 0, 1>`（动态 input_depth，strided，depth_multiplier=1）
+  - 文件：`tflite/kernels/internal/optimized/depthwiseconv_float.h`
+  - 这是 MobileNetV1 全部 13 个 depthwise convs 都走的 kernel（FIND-005）
+- 实现策略：
+  - 单一 vsetvl 驱动循环（取代 Neon 的 16-wide / 4-wide / scalar tail 三段）
+  - LMUL=4（vfloat32m4_t），单次循环吃 vl 个 float
+  - 用 `vfmacc_vv` 做融合乘加，accumulation 顺序与 scalar 完全一致 → 精度等价或更优
+  - VLEN-agnostic，对 vlen=128/256/512 都成立
+- 结果（mobilenet_v1_1.0_224.tflite，QEMU vlen=256，5 runs）：
+
+  | 指标 | scalar | RVV pilot | 变化 |
+  |---|---|---|---|
+  | DEPTHWISE_CONV_2D 累计 ms | 757 | **352** | **-53.5%（2.15×）** |
+  | CONV_2D 累计 ms（对照，未改） | 14 981 | 14 873 | ~0% |
+  | 总推理 ms | 15 740 | 15 226 | -3.3% |
+  | std（μs） | 101 057 | 13 688 | -86% |
+
+- 工程含义：
+  - 原 LiteRT 在 RV64GCV 上 depthwise 走的是 `FloatDepthwiseConvAccumRowGeneric`（scalar fallback）。换上 RVV 立即拿到 2.15×
+  - 总推理只降 3.3% 因为 depthwise 在 FP32 MobileNetV1 占比小（4.8%）；RVV depthwise 对 INT8 模型（DEPTHWISE 占比更高）会更值钱（待 Task 9 验证）
+  - **真正动总推理需要碰 ruy GEMM**（CONV_2D 95%）— Task 8
+  - 标准差从 101 ms 降到 14 ms，说明矢量代码 path 可预测性比 scalar 好（更少分支）
+- 接下来还要做：
+  - 数值精度独立测试（目前 only by inference 不崩 + FMA 顺序与 scalar 完全一致间接证明）
+  - 把其它 depthwise specialization（`<true, 0, 2>`、`<true, 0, 8>`、`<true, 0, 16>` 等）也补上
+- #pilot #rvv #depthwise #milestone
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04

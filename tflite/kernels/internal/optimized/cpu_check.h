@@ -20,6 +20,8 @@ limitations under the License.
 // This should be removed, but with a global run of presubmits to catch
 // any such issues. This requires running more than just TFLite presubmits.
 #include "tflite/kernels/internal/optimized/neon_check.h"
+// RVSPOC S2601: parallel header to expose USE_RVV / <riscv_vector.h>.
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 
 namespace tflite {
 

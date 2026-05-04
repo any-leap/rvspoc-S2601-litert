@@ -760,6 +760,57 @@ struct FloatDepthwiseConvKernel<true, 4, 1> {
 };
 #endif
 
+// ============================================================================
+// RVSPOC S2601: RVV 1.0 specializations of FloatDepthwiseConvKernel.
+//
+// Mirrors the structure of the USE_NEON block above. We deliberately add only
+// one specialization for the pilot — <true, 0, 1>, the dynamic-input-depth,
+// strided, depth_multiplier=1 case. This is the kernel selected by
+// DepthwiseConvImpl for every depthwise conv in MobileNetV1 (input_depth ∈
+// {32, 64, 128, 256, 512, 1024}, none match the fixed-depth specializations
+// above), so it gives us a real measurement on the workload from FIND-005.
+//
+// Vector-length agnostic by design: a single vsetvl-driven loop adapts to
+// VLEN ∈ {128, 256, 512, …} per the spec requirement to support all three
+// VLENs without recompilation.
+// ============================================================================
+#ifdef USE_RVV
+
+template <>
+struct FloatDepthwiseConvKernel<true, 0, 1> {
+  static void Run(int num_output_pixels, int input_depth,
+                  int /* depth_multiplier */, const float* input_ptr,
+                  int input_ptr_increment, const float* filter_ptr,
+                  float* acc_buffer_ptr) {
+    // Each output pixel: acc_buffer[c] += input[c] * filter[c] for c in [0, input_depth).
+    // The Neon equivalent unrolls 16-wide / 4-wide / scalar tail; RVV handles
+    // all widths with one vsetvl loop. LMUL=4 → group of 4 vector regs, big
+    // enough vl that the inner loop trip count is small even for input_depth
+    // = 32 (vl ≈ 32 at VLEN=256).
+    for (int outp = 0; outp < num_output_pixels; outp++) {
+      const float* local_filter_ptr = filter_ptr;
+      const float* local_input_ptr = input_ptr;
+      size_t remaining = static_cast<size_t>(input_depth);
+      while (remaining > 0) {
+        size_t vl = __riscv_vsetvl_e32m4(remaining);
+        vfloat32m4_t v_filter = __riscv_vle32_v_f32m4(local_filter_ptr, vl);
+        vfloat32m4_t v_input = __riscv_vle32_v_f32m4(local_input_ptr, vl);
+        vfloat32m4_t v_acc = __riscv_vle32_v_f32m4(acc_buffer_ptr, vl);
+        // Fused multiply-add: acc += input * filter
+        v_acc = __riscv_vfmacc_vv_f32m4(v_acc, v_input, v_filter, vl);
+        __riscv_vse32_v_f32m4(acc_buffer_ptr, v_acc, vl);
+        local_filter_ptr += vl;
+        local_input_ptr += vl;
+        acc_buffer_ptr += vl;
+        remaining -= vl;
+      }
+      input_ptr += input_ptr_increment;
+    }
+  }
+};
+
+#endif  // USE_RVV
+
 // Accumulates the effect of one row of the filter, on a segment of one row
 // of the output, accessing the corresponding one row of the input.
 template <bool kAllowStrided, int kFixedInputDepth, int kFixedDepthMultiplier>
@@ -989,6 +1040,13 @@ inline void DepthwiseConvImpl(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 16)
 
 #endif  // USE_NEON
+
+  // RVSPOC S2601: enable the RVV specialization(s) we provide. Currently
+  // only <true, 0, 1> is implemented; the rest fall through to the generic
+  // FloatDepthwiseConvAccumRowGeneric and will be filled in incrementally.
+#ifdef USE_RVV
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
+#endif  // USE_RVV
 
 #undef TFMINI_USE_DEPTHWISECONV_KERNEL
 
