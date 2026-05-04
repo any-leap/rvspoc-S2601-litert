@@ -26,4 +26,7 @@ cmake -G Ninja \
   -DTFLITE_ENABLE_RUY=ON \
   "$REPO_ROOT/tflite"
 
-cmake --build . -j"$(nproc)" --target benchmark_model
+# See GOT-002: LiteRT cc1plus is RAM-hungry; cap parallelism for Docker VM.
+BUILD_JOBS="${BUILD_JOBS:-4}"
+echo "Building with -j${BUILD_JOBS} (override with BUILD_JOBS=N)"
+cmake --build . -j"${BUILD_JOBS}" --target benchmark_model

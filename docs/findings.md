@@ -70,6 +70,33 @@
 - QEMU 调用约定：`qemu-riscv64-static -cpu rv64,v=true,vlen=256,elen=64 ./binary.elf`
 - #toolchain #docker #qemu #rvv
 
+## FIND-004 [build] rvspoc fork 的 standalone 拆分残留 — proto 路径不一致
+
+- 日期：2026-05-05
+- 现象：host build 跑到 ~600/642 时，protoc 报错：
+  ```
+  /work/tflite/profiling/proto/profiling_info.proto: File does not reside within
+  any path specified using --proto_path (or -I).
+  ```
+  涉及 3 个 .proto：`tflite/profiling/proto/profiling_info.proto`、`tflite/profiling/proto/model_runtime_info.proto`、`tflite/tools/benchmark/proto/benchmark_result.proto`
+- 根因/机制：
+  - rvspoc fork 是 LiteRT 拆分后的 standalone 仓库（顶层 `tflite/` 而不是 `tensorflow/lite/`）
+  - 但 `tflite/profiling/proto/CMakeLists.txt` 和 `tflite/tools/benchmark/proto/CMakeLists.txt` 没有跟着拆分改干净，仍然写 `--proto_path=${TENSORFLOW_SOURCE_DIR}` 并把 .pb.h 输出到 `${CMAKE_BINARY_DIR}/tensorflow/lite/profiling/proto/`
+  - 但 C++ 代码（`tflite/profiling/profile_summary_formatter.h` 等）已经改为 `#include "tflite/profiling/proto/profiling_info.pb.h"`
+  - 两边路径对不上 → protoc 找不到 .proto，且就算生成了 C++ 也 include 错路径
+- 证据/复现：
+  ```bash
+  grep -rE 'include.*"(tensorflow/lite|tflite)/profiling/proto/profiling_info' tflite/
+  # 全是 "tflite/..." 路径
+  cat tflite/profiling/proto/CMakeLists.txt
+  # OUTPUT 路径却是 ${CMAKE_BINARY_DIR}/tensorflow/lite/profiling/proto/...
+  ```
+- 修复：patch 这 3 个 CMakeLists 把 OUTPUT 路径和 protoc 命令改用 `tflite/...` + `--proto_path=${TFLITE_SOURCE_DIR}/..`（即 `/work` 仓库根）。详见 commit。
+- 工程含义：
+  - 这是 fork 自己的 bug，不是上游问题——可能值得反提 PR 给 rvspoc 组委会
+  - 后续 sync 上游时要注意别覆盖这个 patch
+- #cmake #proto #fork-bug
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
