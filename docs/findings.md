@@ -208,6 +208,31 @@
   - 真正改总推理延迟需要 attack ruy GEMM（Task 8）
 - #coverage #depthwise #rvv #milestone
 
+## FIND-009 [baseline] 5 个 spec 模型的算子分布跨模型一致：CONV_2D 90%+
+
+- 日期：2026-05-05
+- 测试条件：QEMU vlen=256，3 runs，build 已含 RVV depthwise（FP32 only）
+
+  | 模型 | 总 ms | CONV_2D % | DEPTHWISE % | Other |
+  |---|---|---|---|---|
+  | mobilenet_v1 FP32 | 15 214 | 97.69% | 2.31% (350 ms) | <0.01% |
+  | mobilenet_v1 INT8 | 14 969 | 94.20% | 5.79% (867 ms) | <0.01% |
+  | mobilenet_v2 FP32 | 7 608  | 94.44% | 5.48% (417 ms) | 0.08% |
+  | mobilenet_v2 INT8 | 11 241 | 90.73% | 9.10% (1 023 ms) | 0.17% (ADD 0.16%) |
+  | efficientdet-lite0 INT8 | 33 680 | 89.64% | 9.66% (3 252 ms) | 0.71% (ADD 0.29%, Detection PostProcess 0.19%, DEQUANT 0.14%) |
+
+- 结论（强 + 一致）：
+  - **CONV_2D 在所有 5 个模型上都是 90%+** — 不优化 ruy GEMM 就摸不到 110ms 目标
+  - **DEPTHWISE 在 INT8 模型上 5-10%**（比 FP32 稍高），所以 RVV INT8 depthwise（`integer_ops/depthwise_conv.h`）值得做
+  - **Other 全部加起来 < 1%**，elementwise add/mul、softmax、pool 都不值得碰
+  - INT8 模型在 QEMU 上反而比 FP32 慢（v1: 14.97 vs 15.21 接近；v2: 11.24 vs 7.61 INT8 慢 47%）。原因：INT8 在没 RVV 路径时走 ruy 的 generic INT8 GEMM，比 FP32 generic 更慢。这也说明对 INT8 改 RVV 的回报会比 FP32 还大
+- 注意：**FP32 mobilenet_v1 上 RVV depthwise 已生效**（350 ms vs scalar 757 ms）— FIND-005 ↔ FIND-009 对比可见
+- 后续优先级（按价值排序）：
+  1. ruy GEMM RVV（cover CONV_2D = 89-98% 全 5 个模型）— Task 8
+  2. RVV INT8 depthwise（`integer_ops/depthwise_conv.h`，覆盖 5-10%）
+  3. EfficientDet 的 ADD/Detection PostProcess — 即使全部归零也只省 0.5%
+- #baseline #profile #int8 #cross-model
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
