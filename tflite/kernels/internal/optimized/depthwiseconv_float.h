@@ -776,36 +776,234 @@ struct FloatDepthwiseConvKernel<true, 4, 1> {
 // ============================================================================
 #ifdef USE_RVV
 
+// Shared per-pixel helper for depth_multiplier == 1 cases (every <*,*,1> spec).
+// Each output pixel: acc_buffer[c] += input[c] * filter[c] for c in [0, input_depth).
+// LMUL=4 keeps the inner-loop trip count low even at smallest VLEN; vfmacc
+// preserves IEEE FMA accumulation order matching the scalar reference.
+inline void RvvDepthwiseDepthMult1Run(int num_output_pixels, int input_depth,
+                                      const float* input_ptr,
+                                      int input_ptr_increment,
+                                      const float* filter_ptr,
+                                      float* acc_buffer_ptr) {
+  for (int outp = 0; outp < num_output_pixels; outp++) {
+    const float* local_filter_ptr = filter_ptr;
+    const float* local_input_ptr = input_ptr;
+    size_t remaining = static_cast<size_t>(input_depth);
+    while (remaining > 0) {
+      size_t vl = __riscv_vsetvl_e32m4(remaining);
+      vfloat32m4_t v_filter = __riscv_vle32_v_f32m4(local_filter_ptr, vl);
+      vfloat32m4_t v_input = __riscv_vle32_v_f32m4(local_input_ptr, vl);
+      vfloat32m4_t v_acc = __riscv_vle32_v_f32m4(acc_buffer_ptr, vl);
+      v_acc = __riscv_vfmacc_vv_f32m4(v_acc, v_input, v_filter, vl);
+      __riscv_vse32_v_f32m4(acc_buffer_ptr, v_acc, vl);
+      local_filter_ptr += vl;
+      local_input_ptr += vl;
+      acc_buffer_ptr += vl;
+      remaining -= vl;
+    }
+    input_ptr += input_ptr_increment;
+  }
+}
+
 template <>
 struct FloatDepthwiseConvKernel<true, 0, 1> {
   static void Run(int num_output_pixels, int input_depth,
                   int /* depth_multiplier */, const float* input_ptr,
                   int input_ptr_increment, const float* filter_ptr,
                   float* acc_buffer_ptr) {
-    // Each output pixel: acc_buffer[c] += input[c] * filter[c] for c in [0, input_depth).
-    // The Neon equivalent unrolls 16-wide / 4-wide / scalar tail; RVV handles
-    // all widths with one vsetvl loop. LMUL=4 → group of 4 vector regs, big
-    // enough vl that the inner loop trip count is small even for input_depth
-    // = 32 (vl ≈ 32 at VLEN=256).
-    for (int outp = 0; outp < num_output_pixels; outp++) {
-      const float* local_filter_ptr = filter_ptr;
-      const float* local_input_ptr = input_ptr;
-      size_t remaining = static_cast<size_t>(input_depth);
+    RvvDepthwiseDepthMult1Run(num_output_pixels, input_depth, input_ptr,
+                              input_ptr_increment, filter_ptr, acc_buffer_ptr);
+  }
+};
+
+// ----------------------------------------------------------------------------
+// Generic helper: per-input-channel broadcast for depth_multiplier > 1.
+// The structure that's shared by every <true, 0, M> case with M > 1:
+//   for each output pixel:
+//     for each input channel c:
+//       acc[c*M .. c*M+M-1] += filter[c*M .. c*M+M-1] * input[c]
+// We can implement it with a single vsetvl-driven inner loop over M;
+// that's VLEN-agnostic and works for any M (including non-pow-2 cases like 20).
+// All <true, 0, M> specializations forward here with M as a runtime arg.
+inline void RvvDepthwiseDynamicDepthMultRun(int num_output_pixels,
+                                            int input_depth,
+                                            int depth_multiplier,
+                                            const float* input_ptr,
+                                            int input_ptr_increment,
+                                            const float* filter_ptr,
+                                            float* acc_buffer_ptr) {
+  for (int outp = 0; outp < num_output_pixels; outp++) {
+    const float* local_filter_ptr = filter_ptr;
+    const float* local_input_ptr = input_ptr;
+    for (int ic = 0; ic < input_depth; ic++) {
+      const float input_val = *local_input_ptr++;
+      size_t remaining = static_cast<size_t>(depth_multiplier);
       while (remaining > 0) {
-        size_t vl = __riscv_vsetvl_e32m4(remaining);
-        vfloat32m4_t v_filter = __riscv_vle32_v_f32m4(local_filter_ptr, vl);
-        vfloat32m4_t v_input = __riscv_vle32_v_f32m4(local_input_ptr, vl);
-        vfloat32m4_t v_acc = __riscv_vle32_v_f32m4(acc_buffer_ptr, vl);
-        // Fused multiply-add: acc += input * filter
-        v_acc = __riscv_vfmacc_vv_f32m4(v_acc, v_input, v_filter, vl);
-        __riscv_vse32_v_f32m4(acc_buffer_ptr, v_acc, vl);
+        size_t vl = __riscv_vsetvl_e32m2(remaining);
+        vfloat32m2_t v_filter = __riscv_vle32_v_f32m2(local_filter_ptr, vl);
+        vfloat32m2_t v_acc = __riscv_vle32_v_f32m2(acc_buffer_ptr, vl);
+        // scalar(input_val) * v_filter, accumulate into v_acc.
+        v_acc = __riscv_vfmacc_vf_f32m2(v_acc, input_val, v_filter, vl);
+        __riscv_vse32_v_f32m2(acc_buffer_ptr, v_acc, vl);
         local_filter_ptr += vl;
-        local_input_ptr += vl;
         acc_buffer_ptr += vl;
         remaining -= vl;
       }
-      input_ptr += input_ptr_increment;
     }
+    input_ptr += input_ptr_increment;
+  }
+}
+
+template <>
+struct FloatDepthwiseConvKernel<true, 0, 2> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+
+template <>
+struct FloatDepthwiseConvKernel<true, 0, 8> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+
+template <>
+struct FloatDepthwiseConvKernel<true, 0, 16> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+
+// Fixed-input-depth, depth_multiplier == 1 specializations.
+// The Neon equivalents pre-load filter values once (since input_depth is
+// known at compile time) and unroll heavily; on RVV the same effect comes
+// "for free" from vsetvl + LMUL=4 — the helper above does the right thing
+// regardless of whether input_depth is dynamic or fixed.
+template <>
+struct FloatDepthwiseConvKernel<false, 8, 1> {
+  static void Run(int num_output_pixels, int input_depth,
+                  int /* depth_multiplier */, const float* input_ptr,
+                  int input_ptr_increment, const float* filter_ptr,
+                  float* acc_buffer_ptr) {
+    RvvDepthwiseDepthMult1Run(num_output_pixels, input_depth, input_ptr,
+                              input_ptr_increment, filter_ptr, acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<false, 2, 1> {
+  static void Run(int num_output_pixels, int input_depth,
+                  int /* depth_multiplier */, const float* input_ptr,
+                  int input_ptr_increment, const float* filter_ptr,
+                  float* acc_buffer_ptr) {
+    RvvDepthwiseDepthMult1Run(num_output_pixels, input_depth, input_ptr,
+                              input_ptr_increment, filter_ptr, acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 8, 1> {
+  static void Run(int num_output_pixels, int input_depth,
+                  int /* depth_multiplier */, const float* input_ptr,
+                  int input_ptr_increment, const float* filter_ptr,
+                  float* acc_buffer_ptr) {
+    RvvDepthwiseDepthMult1Run(num_output_pixels, input_depth, input_ptr,
+                              input_ptr_increment, filter_ptr, acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 2, 1> {
+  static void Run(int num_output_pixels, int input_depth,
+                  int /* depth_multiplier */, const float* input_ptr,
+                  int input_ptr_increment, const float* filter_ptr,
+                  float* acc_buffer_ptr) {
+    RvvDepthwiseDepthMult1Run(num_output_pixels, input_depth, input_ptr,
+                              input_ptr_increment, filter_ptr, acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 4, 1> {
+  static void Run(int num_output_pixels, int input_depth,
+                  int /* depth_multiplier */, const float* input_ptr,
+                  int input_ptr_increment, const float* filter_ptr,
+                  float* acc_buffer_ptr) {
+    RvvDepthwiseDepthMult1Run(num_output_pixels, input_depth, input_ptr,
+                              input_ptr_increment, filter_ptr, acc_buffer_ptr);
+  }
+};
+
+// Fixed-input-depth, depth_multiplier > 1 specializations: forward to the
+// generic broadcast helper. Even at fixed (input_depth=1, mult=20) where the
+// Neon code does a custom load pattern, the RVV vsetvl loop covers it
+// correctly — performance may not match a hand-tuned Neon unroll at very
+// small mults but correctness is guaranteed.
+template <>
+struct FloatDepthwiseConvKernel<true, 1, 8> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 1, 32> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 1, 20> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 3, 2> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
+  }
+};
+template <>
+struct FloatDepthwiseConvKernel<true, 3, 4> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const float* input_ptr, int input_ptr_increment,
+                  const float* filter_ptr, float* acc_buffer_ptr) {
+    RvvDepthwiseDynamicDepthMultRun(num_output_pixels, input_depth,
+                                    depth_multiplier, input_ptr,
+                                    input_ptr_increment, filter_ptr,
+                                    acc_buffer_ptr);
   }
 };
 
@@ -1041,11 +1239,26 @@ inline void DepthwiseConvImpl(
 
 #endif  // USE_NEON
 
-  // RVSPOC S2601: enable the RVV specialization(s) we provide. Currently
-  // only <true, 0, 1> is implemented; the rest fall through to the generic
-  // FloatDepthwiseConvAccumRowGeneric and will be filled in incrementally.
+  // RVSPOC S2601: enable the RVV specializations we provide. The remaining
+  // Neon-only specializations fall through to the generic
+  // FloatDepthwiseConvAccumRowGeneric for now and will be filled in
+  // incrementally as we cover more of the spec's 90% Neon-coverage gate.
 #ifdef USE_RVV
+  // Order matches the Neon block above (decreasing preference).
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 20)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 32)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 3, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 3, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 4, 1)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 16)
 #endif  // USE_RVV
 
 #undef TFMINI_USE_DEPTHWISECONV_KERNEL

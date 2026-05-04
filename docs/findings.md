@@ -182,6 +182,32 @@
   - 把这个测试机制扩展到后续 RVV kernel
 - #accuracy #rvv #depthwise #milestone
 
+## FIND-008 [coverage] depthwiseconv_float.h RVV 覆盖率 100%（14/14 specs）
+
+- 日期：2026-05-05
+- 范围：`tflite/kernels/internal/optimized/depthwiseconv_float.h`
+- 已覆盖的 14 个 Neon spec → RVV 等价：
+
+  | spec | 实现策略 |
+  |---|---|
+  | `<true, 0, 1>` | 直接调 `RvvDepthwiseDepthMult1Run`（vfmacc_vv，LMUL=4） |
+  | `<true, 0, 2/8/16>` | 调 `RvvDepthwiseDynamicDepthMultRun`（vfmacc_vf 标量广播，LMUL=2） |
+  | `<false, 8/2, 1>` | forward to mult-1 helper |
+  | `<true, 8/2/4, 1>` | forward to mult-1 helper |
+  | `<true, 1, 8/20/32>` | forward to broadcast helper |
+  | `<true, 3, 2/4>` | forward to broadcast helper |
+
+- 设计决策：14 个 spec **共用 2 个 helper**，因为：
+  - 对 mult==1 的 case，输入是否 fixed depth 在 Neon 那里是为了静态 unroll；RVV 用 `vsetvl + LMUL=4` 让 GCC 自动选最优 vl，效果等价
+  - 对 mult>1 的 case，逻辑都是"per-input-channel scalar broadcast → vfmacc_vf"，filter 布局相同
+- 总代码量：~150 LOC（vs Neon 的 ~700 LOC for 同样 14 个 spec），可维护性大幅好转
+- 测试：`test/rvv/depthwise_float_accuracy_test.cc` 22 cases，三档 VLEN 全 bit-exact
+- benchmark 数字：MobileNetV1 上无变化（它只走 `<true, 0, 1>`），但赛题硬性 ≥90% 覆盖率这一票稳了
+- 接下来还要做：
+  - 把同套思路推广到 INT8 depthwise（`integer_ops/depthwise_conv*.h`、`depthwiseconv_uint8*.h`）
+  - 真正改总推理延迟需要 attack ruy GEMM（Task 8）
+- #coverage #depthwise #rvv #milestone
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
