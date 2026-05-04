@@ -28,3 +28,8 @@ cmake_build/
 .vscode/
 *.whl
 /.litert_configure.bazelrc
+# RVSPOC project local files (added on top of LiteRT's .gitignore)
+build-rv64/
+build-x86/
+*.tflite.local
+.cache/
