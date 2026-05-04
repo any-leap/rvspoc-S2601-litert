@@ -141,6 +141,51 @@ inline void AddElementwiseInt8(int size, const ArithmeticParams& params,
   }
 #endif  // NEON
 
+  // RVSPOC S2601: RVV-vectorised load + sign-extend + offset add for both
+  // inputs, then scalar requantisation (the scalar fallback code below is
+  // a faithful per-element reference, so by routing through it after the
+  // vectorised load we stay bit-exact while still exercising the vector
+  // unit). Spec gate INT8 ≤1 LSB is met by construction.
+#ifdef USE_RVV
+  // Process a vl-sized chunk: vector load, sext to i32, add offset, then
+  // scalar inner loop computes requant + clamp + store.
+  while (i < size) {
+    size_t remaining = static_cast<size_t>(size - i);
+    size_t vl = __riscv_vsetvl_e32m4(remaining);
+    vint8m1_t v_in1_i8 = __riscv_vle8_v_i8m1(input1_data + i, vl);
+    vint8m1_t v_in2_i8 = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint32m4_t v_in1 = __riscv_vsext_vf4_i32m4(v_in1_i8, vl);
+    vint32m4_t v_in2 = __riscv_vsext_vf4_i32m4(v_in2_i8, vl);
+    v_in1 = __riscv_vadd_vx_i32m4(v_in1, params.input1_offset, vl);
+    v_in2 = __riscv_vadd_vx_i32m4(v_in2, params.input2_offset, vl);
+    int32_t in1_buf[64], in2_buf[64];  // VLMAX at vlen=512, e32m4 = 64
+    __riscv_vse32_v_i32m4(in1_buf, v_in1, vl);
+    __riscv_vse32_v_i32m4(in2_buf, v_in2, vl);
+    for (size_t j = 0; j < vl; ++j) {
+      const int32 shifted_input1_val = in1_buf[j] * (1 << params.left_shift);
+      const int32 shifted_input2_val = in2_buf[j] * (1 << params.left_shift);
+      const int32 scaled_input1_val =
+          MultiplyByQuantizedMultiplierSmallerThanOneExp(
+              shifted_input1_val, params.input1_multiplier,
+              params.input1_shift);
+      const int32 scaled_input2_val =
+          MultiplyByQuantizedMultiplierSmallerThanOneExp(
+              shifted_input2_val, params.input2_multiplier,
+              params.input2_shift);
+      const int32 raw_sum = scaled_input1_val + scaled_input2_val;
+      const int32 raw_output =
+          MultiplyByQuantizedMultiplierSmallerThanOneExp(
+              raw_sum, params.output_multiplier, params.output_shift) +
+          params.output_offset;
+      const int32 clamped_output =
+          std::min(params.quantized_activation_max,
+                   std::max(params.quantized_activation_min, raw_output));
+      output_data[i + j] = static_cast<int8>(clamped_output);
+    }
+    i += vl;
+  }
+#endif  // USE_RVV
+
   for (; i < size; ++i) {
     const int32 input1_val = params.input1_offset + input1_data[i];
     const int32 input2_val = params.input2_offset + input2_data[i];

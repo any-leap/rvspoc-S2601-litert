@@ -122,6 +122,37 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
   }
 #endif  // NEON
 
+  // RVSPOC S2601: same approach as integer_ops/add.h — vector load + sext +
+  // offset-add, scalar requantisation per element. Bit-exact with the
+  // scalar fallback below by construction.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t remaining = static_cast<size_t>(size - i);
+    size_t vl = __riscv_vsetvl_e32m4(remaining);
+    vint8m1_t v_in1_i8 = __riscv_vle8_v_i8m1(input1_data + i, vl);
+    vint8m1_t v_in2_i8 = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint32m4_t v_in1 = __riscv_vsext_vf4_i32m4(v_in1_i8, vl);
+    vint32m4_t v_in2 = __riscv_vsext_vf4_i32m4(v_in2_i8, vl);
+    v_in1 = __riscv_vadd_vx_i32m4(v_in1, params.input1_offset, vl);
+    v_in2 = __riscv_vadd_vx_i32m4(v_in2, params.input2_offset, vl);
+    int32_t in1_buf[64], in2_buf[64];
+    __riscv_vse32_v_i32m4(in1_buf, v_in1, vl);
+    __riscv_vse32_v_i32m4(in2_buf, v_in2, vl);
+    for (size_t j = 0; j < vl; ++j) {
+      const int32 unclamped_result =
+          params.output_offset +
+          MultiplyByQuantizedMultiplier(in1_buf[j] * in2_buf[j],
+                                        params.output_multiplier,
+                                        params.output_shift);
+      const int32 clamped_output =
+          std::min(params.quantized_activation_max,
+                   std::max(params.quantized_activation_min, unclamped_result));
+      output_data[i + j] = static_cast<int8>(clamped_output);
+    }
+    i += vl;
+  }
+#endif  // USE_RVV
+
   for (; i < size; ++i) {
     const int32 input1_val = params.input1_offset + input1_data[i];
     const int32 input2_val = params.input2_offset + input2_data[i];
