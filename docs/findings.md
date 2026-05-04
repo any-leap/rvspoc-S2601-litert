@@ -352,6 +352,43 @@
 - 累计 GEMM 改造完成度：FP32 ✓、INT8 per-channel ✓；待办：uint8 per-tensor、INT16 输出
 - #milestone #gemm #int8 #efficientdet
 
+## FIND-014 [milestone] RVV uint8 GEMM → MobileNetV1/V2 INT8 2.87× / 3.58×
+
+- 日期：2026-05-05
+- 路径：partial-specialize `cpu_backend_gemm::GemmImpl<uint8_t,uint8_t,int32_t,uint8_t,kIntegerWithUniformMultiplier>` for `__riscv_vector`
+- 数学（per-tensor uniform multiplier，与 `optimized_ops::Conv<uint8>` 对齐）：
+  ```
+  acc[n,m] = sum_k (lhs[n,k] - lhs_zp) * (rhs[k,m] - rhs_zp)
+                                          (vsext + vadd 减 zp + vwmacc widening)
+  acc += bias[n]
+  acc = MultiplyByQuantizedMultiplier(acc, multiplier_fp, shift)
+                                          (uniform，所有 output channel 同一组系数)
+  acc += dst_zp
+  dst[n,m] = clamp_uint8(acc, clamp_min, clamp_max)
+  ```
+- 文件：`tflite/kernels/internal/optimized/rvv_gemm_uint8.h`，复用 `rvv_gemm_int8.h` 的 requantization helpers
+- 5 个模型 benchmark（vs 原始 scalar baseline）：
+
+  | 模型 | scalar baseline | 现在 | 总加速 |
+  |---|---|---|---|
+  | mobilenet_v1 FP32 | 15 740 | 6 684 | **2.35×** |
+  | mobilenet_v1 INT8 | 14 969 | **5 217** | **2.87×** ⭐ |
+  | mobilenet_v2 FP32 | 7 607 | 3 893 | **1.95×** |
+  | mobilenet_v2 INT8 | 11 240 | **3 142** | **3.58×** ⭐ |
+  | efficientdet_lite0 INT8 | 33 680 | 9 950 | **3.39×** ⭐ |
+
+- CONV_2D 算子级（之前是绝对的 hot path）：
+
+  | 模型 | scalar | 现在 | 加速 |
+  |---|---|---|---|
+  | mobilenet_v1 INT8 | 14 060 | 4 905 | **2.87×** |
+  | mobilenet_v2 INT8 | 10 174 | 2 748 | **3.70×** |
+
+- 测试：`gemm_uint8_accuracy_test.cc` 6 cases × 3 VLEN = 18 runs，全部 max_abs_diff=0
+- 累计 GEMM 改造完成度：FP32 ✓、INT8 per-channel ✓、uint8 per-tensor ✓
+- 现在 5 个 spec 模型平均加速 ~2.8×（QEMU；真硬件预期更显著，因为内存带宽差距更小）
+- #milestone #gemm #uint8 #mobilenet
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04

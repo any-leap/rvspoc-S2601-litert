@@ -50,6 +50,7 @@
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
 #include "tflite/kernels/internal/optimized/rvv_gemm_fp32.h"
 #include "tflite/kernels/internal/optimized/rvv_gemm_int8.h"
+#include "tflite/kernels/internal/optimized/rvv_gemm_uint8.h"
 
 namespace tflite {
 namespace cpu_backend_gemm {
@@ -145,6 +146,49 @@ struct GemmImplUsingRvv<std::int8_t, std::int8_t, std::int32_t, std::int8_t,
         /*dst_zp=*/dst_params.zero_point, params.bias,
         params.multiplier_fixedpoint_perchannel,
         params.multiplier_exponent_perchannel,
+        /*clamp_min=*/static_cast<int32_t>(params.clamp_min),
+        /*clamp_max=*/static_cast<int32_t>(params.clamp_max), dst_data);
+  }
+};
+
+// uint8 (per-tensor uniform multiplier) GEMM specialization. Targets the
+// 2018-era per-tensor uint8 quantization used by older MobileNet INT8
+// .tflite models, which dispatches to a different GemmImpl from EfficientDet.
+template <>
+struct GemmImplUsingRvv<std::uint8_t, std::uint8_t, std::int32_t,
+                        std::uint8_t,
+                        QuantizationFlavor::kIntegerWithUniformMultiplier> {
+  static void Run(
+      const MatrixParams<std::uint8_t>& lhs_params,
+      const std::uint8_t* lhs_data,
+      const MatrixParams<std::uint8_t>& rhs_params,
+      const std::uint8_t* rhs_data,
+      const MatrixParams<std::uint8_t>& dst_params, std::uint8_t* dst_data,
+      const GemmParams<std::int32_t, std::uint8_t,
+                       QuantizationFlavor::kIntegerWithUniformMultiplier>&
+          params,
+      CpuBackendContext* context) {
+    const bool layout_ok = lhs_params.order == Order::kRowMajor &&
+                           rhs_params.order == Order::kColMajor &&
+                           dst_params.order == Order::kColMajor &&
+                           lhs_params.rows == dst_params.rows &&
+                           lhs_params.cols == rhs_params.rows &&
+                           rhs_params.cols == dst_params.cols;
+    if (!layout_ok) {
+      GemmImplUsingRuy<std::uint8_t, std::uint8_t, std::int32_t,
+                       std::uint8_t,
+                       QuantizationFlavor::kIntegerWithUniformMultiplier>::
+          Run(lhs_params, lhs_data, rhs_params, rhs_data, dst_params, dst_data,
+              params, context);
+      return;
+    }
+    optimized_rvv::RvvGemmUint8Uniform(
+        /*m=*/rhs_params.cols, /*n=*/lhs_params.rows,
+        /*k=*/lhs_params.cols, lhs_data,
+        /*lhs_zp=*/lhs_params.zero_point, rhs_data,
+        /*rhs_zp=*/rhs_params.zero_point,
+        /*dst_zp=*/dst_params.zero_point, params.bias,
+        params.multiplier_fixedpoint, params.multiplier_exponent,
         /*clamp_min=*/static_cast<int32_t>(params.clamp_min),
         /*clamp_max=*/static_cast<int32_t>(params.clamp_max), dst_data);
   }

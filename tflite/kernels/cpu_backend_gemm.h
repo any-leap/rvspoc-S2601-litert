@@ -89,6 +89,12 @@ struct GemmImpl<std::int8_t, std::int8_t, std::int32_t, std::int8_t,
     : detail::GemmImplUsingRvv<std::int8_t, std::int8_t, std::int32_t,
                                std::int8_t,
                                QuantizationFlavor::kIntegerWithPerRowMultiplier> {};
+template <>
+struct GemmImpl<std::uint8_t, std::uint8_t, std::int32_t, std::uint8_t,
+                QuantizationFlavor::kIntegerWithUniformMultiplier>
+    : detail::GemmImplUsingRvv<std::uint8_t, std::uint8_t, std::int32_t,
+                               std::uint8_t,
+                               QuantizationFlavor::kIntegerWithUniformMultiplier> {};
 #endif
 
 #if !defined(TFLITE_WITH_RUY)
