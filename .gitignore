@@ -31,6 +31,7 @@ cmake_build/
 # RVSPOC project local files (added on top of LiteRT's .gitignore)
 build-host/
 build-rv64/
+build-rvv-tests/
 build-x86/
 *.tflite.local
 .cache/

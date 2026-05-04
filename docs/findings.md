@@ -156,6 +156,32 @@
   - 把其它 depthwise specialization（`<true, 0, 2>`、`<true, 0, 8>`、`<true, 0, 16>` 等）也补上
 - #pilot #rvv #depthwise #milestone
 
+## FIND-007 [accuracy] RVV depthwise <true,0,1> 对 scalar bit-exact，3 个 VLEN 全过
+
+- 日期：2026-05-05
+- 测试：`test/rvv/depthwise_float_accuracy_test.cc` 用 11 个 case（MobileNetV1 实际 input_depth + 奇数尾边界）
+- 结果：**所有 case 在 vlen=128/256/512 三档下 max_abs=0.000e+00，max_rel=0.000e+00**
+
+  | VLEN | cases passed | max_rel |
+  |---|---|---|
+  | 128 | 11/11 | 0 |
+  | 256 | 11/11 | 0 |
+  | 512 | 11/11 | 0 |
+
+- 为什么 bit-exact：
+  - RVV 实现按相同顺序遍历 input channel
+  - `vfmacc` 是 IEEE FMA（一次舍入），与 scalar 的 `acc += a*b`（两次舍入：mul、add）相比**精度只会更高**
+  - 在这里两边都被舍到同一个 float — 因为 (a*b + c) 本来就在表示范围内
+- 已满足 spec 三项硬要求：
+  - ✅ 算子级 FP32 相对误差 ≤ 1e-5（实际 0）
+  - ✅ 支持不同 VLEN（vsetvl 自适应，128/256/512 实测过）
+  - ✅ 用 RVV intrinsics（不是手写汇编，便于 GCC 优化）
+- 跑法：`docker run ... bash scripts/run_rvv_tests.sh`
+- 不在 spec 内但还要做：
+  - 模型级 Top-1 精度对比（≤ 0.1%）— 需要 ImageNet eval 集
+  - 把这个测试机制扩展到后续 RVV kernel
+- #accuracy #rvv #depthwise #milestone
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
