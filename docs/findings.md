@@ -51,6 +51,25 @@
   - `4bit/` 目录下的 `_aarch64_sdot.cc` / `_aarch64_nosdot.cc` / `_arm32.cc` 是 aarch64/arm32 平台特定汇编，对应到 RISC-V 应统一用 RVV intrinsic 实现（一个 `.cc` 而不是三个）
 - #kernels #inventory #neon
 
+## FIND-003 [工具链] Docker + GCC 14.2 + QEMU 8.2 路线打通 RVV 1.0
+
+- 日期：2026-05-05
+- 现象：在 macOS Apple Silicon 上需要 cross-compile + run RV64GCV ELF
+- 方案：项目自建 Docker 镜像 `rvspoc-s2601:latest`（基于 ubuntu:24.04），装：
+  - `gcc-14-riscv64-linux-gnu` / `g++-14-riscv64-linux-gnu`（GCC 14.2.0，full RVV 1.0 intrinsic 支持）
+  - `qemu-user-static`（QEMU 8.2.2，默认 vector version v1.0）
+  - cmake 3.28.3 + ninja 1.11.1
+- 证据/复现：
+  ```bash
+  ./docker/rvspoc/build.sh
+  docker run --rm -v "$(pwd):/work" -w /work rvspoc-s2601:latest \
+    bash docker/rvspoc/smoke_test/run_smoke.sh
+  # 输出："rvv_hello: ... PASS"，c[0]=16.0 c[15]=16.0
+  ```
+- ELF 验证：`ELF 64-bit LSB executable, UCB RISC-V, RVC, double-float ABI, statically linked`
+- QEMU 调用约定：`qemu-riscv64-static -cpu rv64,v=true,vlen=256,elen=64 ./binary.elf`
+- #toolchain #docker #qemu #rvv
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
