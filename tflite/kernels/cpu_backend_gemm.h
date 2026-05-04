@@ -83,6 +83,12 @@ struct GemmImpl<float, float, float, float,
                 QuantizationFlavor::kFloatingPoint>
     : detail::GemmImplUsingRvv<float, float, float, float,
                                QuantizationFlavor::kFloatingPoint> {};
+template <>
+struct GemmImpl<std::int8_t, std::int8_t, std::int32_t, std::int8_t,
+                QuantizationFlavor::kIntegerWithPerRowMultiplier>
+    : detail::GemmImplUsingRvv<std::int8_t, std::int8_t, std::int32_t,
+                               std::int8_t,
+                               QuantizationFlavor::kIntegerWithPerRowMultiplier> {};
 #endif
 
 #if !defined(TFLITE_WITH_RUY)

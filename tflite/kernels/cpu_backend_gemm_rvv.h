@@ -49,6 +49,7 @@
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
 #include "tflite/kernels/internal/optimized/rvv_gemm_fp32.h"
+#include "tflite/kernels/internal/optimized/rvv_gemm_int8.h"
 
 namespace tflite {
 namespace cpu_backend_gemm {
@@ -101,6 +102,51 @@ struct GemmImplUsingRvv<float, float, float, float,
         /*m=*/rhs_params.cols, /*n=*/lhs_params.rows,
         /*k=*/lhs_params.cols, lhs_data, rhs_data, params.bias,
         params.clamp_min, params.clamp_max, dst_data);
+  }
+};
+
+// INT8 (per-channel) GEMM specialization: lhs/rhs/dst all int8, accumulator
+// int32, with kIntegerWithPerRowMultiplier requantization. Matches the
+// shape produced by optimized_integer_ops::ConvPerChannel (the modern
+// per-channel INT8 path used by EfficientDet & similar models).
+template <>
+struct GemmImplUsingRvv<std::int8_t, std::int8_t, std::int32_t, std::int8_t,
+                        QuantizationFlavor::kIntegerWithPerRowMultiplier> {
+  static void Run(
+      const MatrixParams<std::int8_t>& lhs_params,
+      const std::int8_t* lhs_data,
+      const MatrixParams<std::int8_t>& rhs_params,
+      const std::int8_t* rhs_data,
+      const MatrixParams<std::int8_t>& dst_params, std::int8_t* dst_data,
+      const GemmParams<std::int32_t, std::int8_t,
+                       QuantizationFlavor::kIntegerWithPerRowMultiplier>&
+          params,
+      CpuBackendContext* context) {
+    const bool layout_ok = lhs_params.order == Order::kRowMajor &&
+                           rhs_params.order == Order::kColMajor &&
+                           dst_params.order == Order::kColMajor &&
+                           lhs_params.rows == dst_params.rows &&
+                           lhs_params.cols == rhs_params.rows &&
+                           rhs_params.cols == dst_params.cols &&
+                           lhs_params.zero_point == 0 &&
+                           params.multiplier_fixedpoint_perchannel != nullptr &&
+                           params.multiplier_exponent_perchannel != nullptr;
+    if (!layout_ok) {
+      GemmImplUsingRuy<std::int8_t, std::int8_t, std::int32_t, std::int8_t,
+                       QuantizationFlavor::kIntegerWithPerRowMultiplier>::
+          Run(lhs_params, lhs_data, rhs_params, rhs_data, dst_params, dst_data,
+              params, context);
+      return;
+    }
+    optimized_rvv::RvvGemmInt8PerChannel(
+        /*m=*/rhs_params.cols, /*n=*/lhs_params.rows,
+        /*k=*/lhs_params.cols, lhs_data, rhs_data,
+        /*rhs_zp=*/rhs_params.zero_point,
+        /*dst_zp=*/dst_params.zero_point, params.bias,
+        params.multiplier_fixedpoint_perchannel,
+        params.multiplier_exponent_perchannel,
+        /*clamp_min=*/static_cast<int32_t>(params.clamp_min),
+        /*clamp_max=*/static_cast<int32_t>(params.clamp_max), dst_data);
   }
 };
 

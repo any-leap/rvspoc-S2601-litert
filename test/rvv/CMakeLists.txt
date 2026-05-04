@@ -64,3 +64,6 @@ target_compile_options(depthwise_uint8_accuracy_test PRIVATE -O3 -Wall)
 
 add_executable(gemm_float_accuracy_test gemm_float_accuracy_test.cc)
 target_compile_options(gemm_float_accuracy_test PRIVATE -O3 -Wall)
+
+add_executable(gemm_int8_accuracy_test gemm_int8_accuracy_test.cc)
+target_compile_options(gemm_int8_accuracy_test PRIVATE -O3 -Wall)
