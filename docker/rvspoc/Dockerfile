@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc-14-riscv64-linux-gnu \
       g++-14-riscv64-linux-gnu \
       qemu-user-static \
+      protobuf-compiler \
       file \
       vim \
       less \

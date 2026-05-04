@@ -8,8 +8,12 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 HOST_BUILD="$REPO_ROOT/build-host"
 BUILD_DIR="$REPO_ROOT/build-rv64"
 
-if [ ! -x "$HOST_BUILD/flatbuffers-flatc/bin/flatc" ] && [ ! -x "$HOST_BUILD/_deps/flatbuffers-build/flatc" ]; then
-  echo "ERROR: host flatc not found under $HOST_BUILD." >&2
+# LiteRT's CMakeLists.txt only searches three layouts under TFLITE_HOST_TOOLS_DIR
+# (DIR, DIR/bin, DIR/flatbuffers-flatc/bin). Our host build leaves flatc at
+# build-host/_deps/flatbuffers-build/flatc, so point at that subdir directly.
+HOST_FLATC_DIR="$HOST_BUILD/_deps/flatbuffers-build"
+if [ ! -x "$HOST_FLATC_DIR/flatc" ]; then
+  echo "ERROR: host flatc not found at $HOST_FLATC_DIR/flatc" >&2
   echo "       Run scripts/build_host.sh first." >&2
   exit 1
 fi
@@ -17,13 +21,20 @@ fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
+# Reuse the pre-extracted TF source (see GOT-001).
+TF_SRC_FLAG=()
+if [ -d "$REPO_ROOT/.cache/tensorflow-src/tensorflow/lite" ]; then
+  TF_SRC_FLAG=(-DTENSORFLOW_SOURCE_DIR="$REPO_ROOT/.cache/tensorflow-src")
+fi
+
 cmake -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/toolchain-riscv64-rvv.cmake" \
-  -DTFLITE_HOST_TOOLS_DIR="$HOST_BUILD" \
+  -DTFLITE_HOST_TOOLS_DIR="$HOST_FLATC_DIR" \
   -DTFLITE_ENABLE_XNNPACK=OFF \
   -DTFLITE_ENABLE_GPU=OFF \
   -DTFLITE_ENABLE_RUY=ON \
+  "${TF_SRC_FLAG[@]}" \
   "$REPO_ROOT/tflite"
 
 # See GOT-002: LiteRT cc1plus is RAM-hungry; cap parallelism for Docker VM.
