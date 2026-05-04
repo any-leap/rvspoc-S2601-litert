@@ -1509,6 +1509,149 @@ struct QuantizedDepthwiseConvKernel<false, 12, 1> {
 };
 #endif
 
+// ============================================================================
+// RVSPOC S2601: RVV 1.0 legacy uint8 depthwise specializations.
+//
+// Same two-helper pattern. Differences from integer_ops/depthwise_conv.h
+// (i8 path):
+//   - inputs/filters are uint8 → ZERO-extend to u16 (vzext_vf2), then
+//     reinterpret as i16 to add the signed input/filter offsets
+//   - filter has its own offset (filter_offset), unlike i8 where filter
+//     was symmetric and only input had an offset
+//
+// Math per the original kernels:
+//   for each output pixel, for each input channel c:
+//     i16 input_val = (i16)zext(input[c]) + input_offset
+//     for k in [0, depth_multiplier):
+//       i16 filter_val = (i16)zext(filter[c*M + k]) + filter_offset
+//       acc[c*M + k] += (i32)(input_val * filter_val)
+// ============================================================================
+#ifdef USE_RVV
+
+inline void RvvDepthwiseUint8DepthMult1Run(int num_output_pixels,
+                                           int input_depth,
+                                           const uint8_t* input_ptr,
+                                           int16_t input_offset,
+                                           int input_ptr_increment,
+                                           const uint8_t* filter_ptr,
+                                           int16_t filter_offset,
+                                           int32_t* acc_buffer_ptr) {
+  for (int outp = 0; outp < num_output_pixels; outp++) {
+    const uint8_t* local_filter_ptr = filter_ptr;
+    const uint8_t* local_input_ptr = input_ptr;
+    size_t remaining = static_cast<size_t>(input_depth);
+    while (remaining > 0) {
+      size_t vl = __riscv_vsetvl_e32m4(remaining);
+      vuint8m1_t v_input_u8 = __riscv_vle8_v_u8m1(local_input_ptr, vl);
+      vuint8m1_t v_filter_u8 = __riscv_vle8_v_u8m1(local_filter_ptr, vl);
+      vint32m4_t v_acc = __riscv_vle32_v_i32m4(acc_buffer_ptr, vl);
+      // Zero-extend u8 → u16, reinterpret as i16, add signed offset.
+      vint16m2_t v_input_i16 = __riscv_vreinterpret_v_u16m2_i16m2(
+          __riscv_vzext_vf2_u16m2(v_input_u8, vl));
+      v_input_i16 = __riscv_vadd_vx_i16m2(v_input_i16, input_offset, vl);
+      vint16m2_t v_filter_i16 = __riscv_vreinterpret_v_u16m2_i16m2(
+          __riscv_vzext_vf2_u16m2(v_filter_u8, vl));
+      v_filter_i16 = __riscv_vadd_vx_i16m2(v_filter_i16, filter_offset, vl);
+      v_acc =
+          __riscv_vwmacc_vv_i32m4(v_acc, v_input_i16, v_filter_i16, vl);
+      __riscv_vse32_v_i32m4(acc_buffer_ptr, v_acc, vl);
+      local_input_ptr += vl;
+      local_filter_ptr += vl;
+      acc_buffer_ptr += vl;
+      remaining -= vl;
+    }
+    input_ptr += input_ptr_increment;
+  }
+}
+
+inline void RvvDepthwiseUint8DynamicDepthMultRun(
+    int num_output_pixels, int input_depth, int depth_multiplier,
+    const uint8_t* input_ptr, int16_t input_offset, int input_ptr_increment,
+    const uint8_t* filter_ptr, int16_t filter_offset,
+    int32_t* acc_buffer_ptr) {
+  for (int outp = 0; outp < num_output_pixels; outp++) {
+    const uint8_t* local_filter_ptr = filter_ptr;
+    const uint8_t* local_input_ptr = input_ptr;
+    for (int ic = 0; ic < input_depth; ic++) {
+      const int16_t input_val =
+          static_cast<int16_t>(*local_input_ptr++) + input_offset;
+      size_t remaining = static_cast<size_t>(depth_multiplier);
+      while (remaining > 0) {
+        size_t vl = __riscv_vsetvl_e32m4(remaining);
+        vuint8m1_t v_filter_u8 = __riscv_vle8_v_u8m1(local_filter_ptr, vl);
+        vint16m2_t v_filter_i16 = __riscv_vreinterpret_v_u16m2_i16m2(
+            __riscv_vzext_vf2_u16m2(v_filter_u8, vl));
+        v_filter_i16 = __riscv_vadd_vx_i16m2(v_filter_i16, filter_offset, vl);
+        vint32m4_t v_acc = __riscv_vle32_v_i32m4(acc_buffer_ptr, vl);
+        v_acc = __riscv_vwmacc_vx_i32m4(v_acc, input_val, v_filter_i16, vl);
+        __riscv_vse32_v_i32m4(acc_buffer_ptr, v_acc, vl);
+        local_filter_ptr += vl;
+        acc_buffer_ptr += vl;
+        remaining -= vl;
+      }
+    }
+    input_ptr += input_ptr_increment;
+  }
+}
+
+#define RVSPOC_UINT8_DEPTHWISE_FWD_M1(STRIDED, FIXED_DEPTH)                  \
+  template <>                                                                \
+  struct QuantizedDepthwiseConvKernel<STRIDED, FIXED_DEPTH, 1> {             \
+    static void Run(int num_output_pixels, int input_depth,                  \
+                    int /* depth_multiplier */, const uint8_t* input_ptr,    \
+                    int16_t input_offset, int input_ptr_increment,           \
+                    const uint8_t* filter_ptr, int16_t filter_offset,        \
+                    int32_t* acc_buffer_ptr) {                               \
+      RvvDepthwiseUint8DepthMult1Run(num_output_pixels, input_depth,         \
+                                     input_ptr, input_offset,                \
+                                     input_ptr_increment, filter_ptr,        \
+                                     filter_offset, acc_buffer_ptr);         \
+    }                                                                        \
+  }
+
+#define RVSPOC_UINT8_DEPTHWISE_FWD_MN(STRIDED, FIXED_DEPTH, MULT)            \
+  template <>                                                                \
+  struct QuantizedDepthwiseConvKernel<STRIDED, FIXED_DEPTH, MULT> {          \
+    static void Run(int num_output_pixels, int input_depth,                  \
+                    int depth_multiplier, const uint8_t* input_ptr,          \
+                    int16_t input_offset, int input_ptr_increment,           \
+                    const uint8_t* filter_ptr, int16_t filter_offset,        \
+                    int32_t* acc_buffer_ptr) {                               \
+      RvvDepthwiseUint8DynamicDepthMultRun(                                  \
+          num_output_pixels, input_depth, depth_multiplier, input_ptr,       \
+          input_offset, input_ptr_increment, filter_ptr, filter_offset,      \
+          acc_buffer_ptr);                                                   \
+    }                                                                        \
+  }
+
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(false, 4);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(false, 8);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(false, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(false, 12);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(true, 16);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(true, 8);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(true, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(true, 4);
+RVSPOC_UINT8_DEPTHWISE_FWD_M1(true, 0);
+
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(false, 1, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(false, 2, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(false, 4, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(false, 1, 4);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(false, 4, 4);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(false, 2, 8);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 8, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 1, 16);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 1, 20);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 1, 32);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 1, 8);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 0, 2);
+RVSPOC_UINT8_DEPTHWISE_FWD_MN(true, 0, 3);
+
+#undef RVSPOC_UINT8_DEPTHWISE_FWD_M1
+#undef RVSPOC_UINT8_DEPTHWISE_FWD_MN
+#endif  // USE_RVV
+
 // Accumulates the effect of one row of the filter, on a segment of one row
 // of the output, accessing the corresponding one row of the input.
 template <bool kAllowStrided, int kFixedInputDepth, int kFixedDepthMultiplier>
@@ -1806,6 +1949,32 @@ inline void DepthwiseConvGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
 #endif  // USE_NEON
+
+  // RVSPOC S2601: legacy uint8 depthwise — same 22 specs covered by RVV.
+#ifdef USE_RVV
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 12, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 16, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 16)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 20)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 32)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 4, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
+#endif  // USE_RVV
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {

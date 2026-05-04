@@ -53,3 +53,6 @@ target_compile_options(depthwise_float_accuracy_test PRIVATE -O3 -Wall)
 
 add_executable(depthwise_int8_accuracy_test depthwise_int8_accuracy_test.cc)
 target_compile_options(depthwise_int8_accuracy_test PRIVATE -O3 -Wall)
+
+add_executable(depthwise_uint8_accuracy_test depthwise_uint8_accuracy_test.cc)
+target_compile_options(depthwise_uint8_accuracy_test PRIVATE -O3 -Wall)

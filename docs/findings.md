@@ -256,6 +256,29 @@
 - 满足 spec：INT8 算子级误差 ≤ 1 LSB → 实际 0 LSB ✓
 - #coverage #int8 #efficientdet #depthwise
 
+## FIND-011 [coverage] depthwiseconv_uint8.h RVV 100%（22/22）+ MobileNet INT8 2.71×
+
+- 日期：2026-05-05
+- 范围：`tflite/kernels/internal/optimized/depthwiseconv_uint8.h`（2127 LOC，第二大 Neon 文件）的 22 个 spec
+- 实现：第三对 helper（`RvvDepthwiseUint8DepthMult1Run` + `RvvDepthwiseUint8DynamicDepthMultRun`）
+  - 关键差异 vs INT8 版：
+    - `vzext_vf2` (zero-extend，不是 sign-extend) 处理 uint8
+    - `vreinterpret_v_u16m2_i16m2` 把 uint16 view 转成 int16 view 后加 signed offset
+    - 多一个 `filter_offset` 参数（uint8 路径 filter 也有 zero_point；int8 路径 filter 是对称的不需要）
+- 结果：
+
+  | 模型 | DEPTHWISE 改前 ms | 改后 ms | Δ |
+  |---|---|---|---|
+  | mobilenet_v1 INT8 (per-tensor uint8) | 858 | **317** | **-63%（2.71×）** |
+  | mobilenet_v2 INT8 (per-tensor uint8) | 1024 | **378** | **-63%（2.71×）** |
+  | efficientdet_lite0 (per-channel int8) | 1459 | 1459 | 0%（不走这条路） |
+
+- 测试：`test/rvv/depthwise_uint8_accuracy_test.cc`，16 cases × 3 VLEN = 48 runs，全部 max_abs_diff=0
+- 累计 RVV depthwise 完成度：
+  - **3 个 LiteRT depthwise 文件 100% 覆盖**（FP32 + INT8 + 老 uint8）
+  - 加速生效在所有 5 个 spec 模型上（FP32 + INT8 全套）
+- #coverage #uint8 #mobilenet #milestone
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
