@@ -6572,6 +6572,23 @@ inline void Dequantize(const tflite::DequantizationParams& op_params,
     vst1q_f32(output_data + i + 4, result_high);
   }
 #endif  // NEON
+  // RVSPOC S2601: u8 → i32 (zext) → f32 → fma with scale + (-zp*scale).
+#ifdef USE_RVV
+  const float fscale = static_cast<float>(scale);
+  const float fzs = static_cast<float>(-zero_point * scale);
+  while (i < flat_size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(flat_size - i));
+    vuint8m1_t v_in_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
+    vuint32m4_t v_in_u32 = __riscv_vzext_vf4_u32m4(v_in_u8, vl);
+    vfloat32m4_t v_f = __riscv_vfcvt_f_xu_v_f32m4(v_in_u32, vl);
+    // result = f32_val * scale + (-zp * scale)
+    vfloat32m4_t v_out =
+        __riscv_vfmadd_vf_f32m4(v_f, fscale, __riscv_vfmv_v_f_f32m4(fzs, vl),
+                                vl);
+    __riscv_vse32_v_f32m4(output_data + i, v_out, vl);
+    i += vl;
+  }
+#endif
   for (; i < flat_size; ++i) {
     const int32_t val = input_data[i];
     const float result = static_cast<float>(scale * (val - zero_point));
