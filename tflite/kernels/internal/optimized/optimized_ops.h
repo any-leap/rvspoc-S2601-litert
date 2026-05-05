@@ -6279,6 +6279,20 @@ inline void HardSwish(const RuntimeShape& input_shape, const float* input_data,
     vst1q_f32(output_data + i, product);
   }
 #endif
+  // RVSPOC S2601: HardSwish(x) = x * min(6, max(0, x + 3)) / 6
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vfloat32m4_t v = __riscv_vle32_v_f32m4(input_data + i, vl);
+    vfloat32m4_t v_reluish = __riscv_vfadd_vf_f32m4(v, 3.0f, vl);
+    v_reluish = __riscv_vfmax_vf_f32m4(v_reluish, 0.0f, vl);
+    v_reluish = __riscv_vfmin_vf_f32m4(v_reluish, 6.0f, vl);
+    vfloat32m4_t v_scaled = __riscv_vfmul_vf_f32m4(v, 1.0f / 6.0f, vl);
+    vfloat32m4_t v_out = __riscv_vfmul_vv_f32m4(v_scaled, v_reluish, vl);
+    __riscv_vse32_v_f32m4(output_data + i, v_out, vl);
+    i += vl;
+  }
+#endif
   for (; i < size; i++) {
     const float in = input_data[i];
     output_data[i] =
