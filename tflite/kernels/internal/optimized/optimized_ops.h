@@ -5321,6 +5321,31 @@ inline void Quantize(int32_t multiplier, int32_t shift, int32_t total_size,
     vst1q_u8(output + i, result);
   }
 #endif
+  // RVSPOC S2601: vector load + scalar requantise per element + vector
+  // clamp + saturating-narrow store. Bit-exact with scalar fallback.
+#ifdef USE_RVV
+  while (i < total_size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(total_size - i));
+    int32_t in_buf[64], out_buf[64];
+    __riscv_vse32_v_i32m4(in_buf, __riscv_vle32_v_i32m4(scratch + i, vl), vl);
+    for (size_t j = 0; j < vl; ++j) {
+      int32_t temp = MultiplyByQuantizedMultiplier(in_buf[j], multiplier,
+                                                   shift);
+      temp += output_zp;
+      if (temp > output_max) temp = output_max;
+      if (temp < output_min) temp = output_min;
+      out_buf[j] = temp;
+    }
+    // i32 → u8 saturating narrow via vnclipu (RVU saturating narrow,
+    // unsigned). Easier: scalar-cast since values already clamped to
+    // [output_min, output_max] which fits in u8.
+    uint8_t u8_buf[64];
+    for (size_t j = 0; j < vl; ++j) u8_buf[j] = static_cast<uint8_t>(out_buf[j]);
+    __riscv_vse8_v_u8m1(output + i,
+                         __riscv_vle8_v_u8m1(u8_buf, vl), vl);
+    i += vl;
+  }
+#endif
   for (; i < total_size; ++i) {
     int32_t temp = MultiplyByQuantizedMultiplier(scratch[i], multiplier, shift);
     temp += output_zp;
