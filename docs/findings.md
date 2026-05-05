@@ -413,6 +413,56 @@
 - 重要提醒：本验证比较的是 **scalar-RV64 vs RVV-RV64**，不是 spec 要求的 **vs x86 reference**。要真正对齐 spec，应再跑一份 x86 native 推理结果做 baseline。但因为 RVV/RV64-scalar 之间的差异已经在 spec budget 内，且 RV64-scalar 应跟 x86 scalar bit-exact（同样的 portable 代码），传递性下来 RVV vs x86 也在 budget 内
 - #model-level #accuracy #verification
 
+## FIND-016 [coverage] op-type 覆盖率约 14 个 op 类型，文件覆盖 11/26
+
+- 日期：2026-05-05
+- 当前 RVV 实现的文件（11 个）：
+  - `depthwiseconv_float.h`（FP32 depthwise，14/14 spec）
+  - `integer_ops/depthwise_conv.h`（INT8 per-channel depthwise，22/22 spec）
+  - `depthwiseconv_uint8.h`（UINT8 per-tensor depthwise，22/22 spec）
+  - `integer_ops/depthwise_conv_hybrid.h`（22/22 + 输出阶段）
+  - `integer_ops/add.h`（INT8 elementwise add）
+  - `integer_ops/mul.h`（INT8 elementwise mul）
+  - `integer_ops/pooling.h`（INT8 max/avg pool）
+  - `integer_ops/mean.h`（INT8 mean）
+  - `integer_ops/lut.h`（u8 LUT for logistic/tanh）
+  - `reduce.h`（uint8 mean）
+  - `optimized_ops.h`（FP32 add/mul/relu、uint8 add/maxpool/avgpool、Quantize/Dequantize、int8 Maximum/Minimum）
+- GEMM specialization 文件（3 个独立 header + adapter + dispatcher hook）：
+  - `rvv_gemm_fp32.h`、`rvv_gemm_int8.h`、`rvv_gemm_uint8.h`
+  - `cpu_backend_gemm_rvv.h`（adapter）、`cpu_backend_gemm.h` 的 partial spec
+- 已覆盖的 op 类型（约 14 个）：
+
+  | Op | 量化模式 | 文件位置 |
+  |---|---|---|
+  | CONV_2D | FP32 + INT8 per-channel + uint8 per-tensor | GEMM hooks |
+  | FULLY_CONNECTED | 同 GEMM hooks | 同 |
+  | DEPTHWISE_CONV_2D | FP32 + INT8 + uint8（每个 100% spec 覆盖）| 3 个 depthwise 文件 |
+  | ADD | INT8 + uint8 + FP32 | integer_ops/add.h、optimized_ops.h |
+  | MUL | INT8 + FP32 | integer_ops/mul.h、optimized_ops.h |
+  | MAX_POOL_2D | INT8 + uint8 | integer_ops/pooling.h、optimized_ops.h |
+  | AVERAGE_POOL_2D | INT8 + uint8 | integer_ops/pooling.h、optimized_ops.h |
+  | MEAN | INT8 + uint8 | integer_ops/mean.h、reduce.h |
+  | RELU | FP32 | optimized_ops.h |
+  | QUANTIZE | uint8 | optimized_ops.h |
+  | DEQUANTIZE | uint8 | optimized_ops.h |
+  | MAXIMUM | INT8 | optimized_ops.h |
+  | MINIMUM | INT8 | optimized_ops.h |
+  | LUT (Logistic/Tanh) | u8 | integer_ops/lut.h |
+
+- 未覆盖的主要 op 类型：
+  - SOFTMAX（需要 vexp 多项式逼近，复杂）
+  - LOGISTIC / TANH FP32（同上，sigmoid/tanh 需要近似）
+  - CONCATENATION（memory copy，不太需要 RVV）
+  - RESIZE_BILINEAR（专用 13k LOC 文件，复杂双线性插值）
+  - PRELU（element-wise，可做）
+  - 4-bit FC（LLM 用，spec 不要求）
+  - BroadcastAdd / BroadcastMul（已覆盖的 broadcast 变体）
+- 按 op-type 算：约 **14 / ~18 = 78%**（spec 要 90%）
+- 按文件算：11 / 26 = 42%
+- 进一步推进的边际成本：剩下的 op 多是复杂数学（exp/sigmoid 近似）或大型手写汇编 fast path（13k+8k LOC），每个都是数小时到数天工作量
+- #coverage #op-types #status
+
 ## FIND-002 [SVE] LiteRT 当前没有 SVE 优化代码
 
 - 日期：2026-05-04
