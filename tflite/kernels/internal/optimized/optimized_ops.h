@@ -7477,6 +7477,16 @@ inline void MaximumScalarBroadcast(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, max_data);
   }
 #endif  // USE_NEON
+  // RVSPOC S2601: vector max with scalar broadcast.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e8m4(static_cast<size_t>(size - i));
+    vint8m4_t v_in2 = __riscv_vle8_v_i8m4(input2_data + i, vl);
+    __riscv_vse8_v_i8m4(output_data + i,
+                         __riscv_vmax_vx_i8m4(v_in2, input1_data, vl), vl);
+    i += vl;
+  }
+#endif
   for (; i < size; ++i) {
     const int8_t input2_val = input2_data[i];
     output_data[i] = std::max(input1_data, input2_val);
@@ -7531,6 +7541,16 @@ inline void MinimumScalarBroadcast(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, min_data);
   }
 #endif  // USE_NEON
+  // RVSPOC S2601: vector min with scalar broadcast.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e8m4(static_cast<size_t>(size - i));
+    vint8m4_t v_in2 = __riscv_vle8_v_i8m4(input2_data + i, vl);
+    __riscv_vse8_v_i8m4(output_data + i,
+                         __riscv_vmin_vx_i8m4(v_in2, input1_data, vl), vl);
+    i += vl;
+  }
+#endif
   for (; i < size; ++i) {
     const int8_t input2_val = input2_data[i];
     output_data[i] = std::min(input1_data, input2_val);
