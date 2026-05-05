@@ -1629,6 +1629,49 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
   }
 #endif  // NEON
 
+  // RVSPOC S2601: vector load + zext + offset-add, scalar requantisation
+  // (bit-exact with the scalar fallback below).
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vuint8m1_t v_in1_u8 = __riscv_vle8_v_u8m1(input1_data + i, vl);
+    vuint8m1_t v_in2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
+    vint32m4_t v_in1 = __riscv_vreinterpret_v_u32m4_i32m4(
+        __riscv_vzext_vf4_u32m4(v_in1_u8, vl));
+    vint32m4_t v_in2 = __riscv_vreinterpret_v_u32m4_i32m4(
+        __riscv_vzext_vf4_u32m4(v_in2_u8, vl));
+    v_in1 = __riscv_vadd_vx_i32m4(v_in1, params.input1_offset, vl);
+    v_in2 = __riscv_vadd_vx_i32m4(v_in2, params.input2_offset, vl);
+    int32_t in1_buf[64], in2_buf[64];
+    __riscv_vse32_v_i32m4(in1_buf, v_in1, vl);
+    __riscv_vse32_v_i32m4(in2_buf, v_in2, vl);
+    for (size_t j = 0; j < vl; ++j) {
+      const int32_t shifted_input1_val =
+          in1_buf[j] * (1 << params.left_shift);
+      const int32_t shifted_input2_val =
+          in2_buf[j] * (1 << params.left_shift);
+      const int32_t scaled_input1_val =
+          MultiplyByQuantizedMultiplierSmallerThanOneExp(
+              shifted_input1_val, params.input1_multiplier,
+              params.input1_shift);
+      const int32_t scaled_input2_val =
+          MultiplyByQuantizedMultiplierSmallerThanOneExp(
+              shifted_input2_val, params.input2_multiplier,
+              params.input2_shift);
+      const int32_t raw_sum = scaled_input1_val + scaled_input2_val;
+      const int32_t raw_output =
+          MultiplyByQuantizedMultiplierSmallerThanOneExp(
+              raw_sum, params.output_multiplier, params.output_shift) +
+          params.output_offset;
+      const int32_t clamped_output =
+          std::min(params.quantized_activation_max,
+                   std::max(params.quantized_activation_min, raw_output));
+      output_data[i + j] = static_cast<uint8_t>(clamped_output);
+    }
+    i += vl;
+  }
+#endif  // USE_RVV
+
   for (; i < size; ++i) {
     const int32_t input1_val = params.input1_offset + input1_data[i];
     const int32_t input2_val = params.input2_offset + input2_data[i];
@@ -3217,6 +3260,25 @@ inline bool AveragePool(const PoolParams& params,
             buf8 = vmin_u8(buf8, vdup_n_u8(params.quantized_activation_max));
             buf8 = vmax_u8(buf8, vdup_n_u8(params.quantized_activation_min));
             vst1_u8(output_ptr + channel, buf8);
+          }
+#endif
+          // RVSPOC S2601: rounded divide-by-filter_count + clamp (scalar
+          // inner because integer division is hairy under vector).
+#ifdef USE_RVV
+          while (channel < tranche_depth) {
+            size_t vl = __riscv_vsetvl_e8m1(
+                static_cast<size_t>(tranche_depth - channel));
+            uint8_t obuf[64];
+            for (size_t j = 0; j < vl; ++j) {
+              uint16_t a = (acc[channel + j] + filter_count / 2) /
+                           filter_count;
+              a = std::max<uint16_t>(a, params.quantized_activation_min);
+              a = std::min<uint16_t>(a, params.quantized_activation_max);
+              obuf[j] = static_cast<uint8_t>(a);
+            }
+            __riscv_vse8_v_u8m1(output_ptr + channel,
+                                 __riscv_vle8_v_u8m1(obuf, vl), vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
