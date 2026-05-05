@@ -3618,6 +3618,60 @@ inline void SoftmaxImpl(const SoftmaxParams& params,
   MatchingFlatSize(input_shape, output_shape);
 
   const int logit_size = input_shape.Dims(input_shape.DimensionsCount() - 1);
+#if defined(__riscv_vector)
+  // RVSPOC S2601: per-batch vector reductions (max-reduce, sum-reduce,
+  // normalize divide). exp() stays scalar — RVV 1.0 has no native vexp,
+  // and a polynomial approximation would need careful tuning to stay
+  // within the spec's algo-level FP32 tolerance.
+  const float beta = params.beta;
+  for (int b = start_batch; b < end_batch; ++b) {
+    const float* in = input_data + b * logit_size;
+    float* out = output_data + b * logit_size;
+    // Pass 1: vector max-reduce over the logits.
+    size_t remaining = static_cast<size_t>(logit_size);
+    const size_t vl0 = __riscv_vsetvl_e32m4(remaining);
+    vfloat32m4_t v_max = __riscv_vfmv_v_f_f32m4(
+        -std::numeric_limits<float>::infinity(), vl0);
+    {
+      const float* p = in;
+      size_t r = remaining;
+      while (r > 0) {
+        size_t vl = __riscv_vsetvl_e32m4(r);
+        vfloat32m4_t v = __riscv_vle32_v_f32m4(p, vl);
+        v_max = __riscv_vfmax_vv_f32m4(v_max, v, vl);
+        p += vl; r -= vl;
+      }
+    }
+    vfloat32m1_t v_neg_inf = __riscv_vfmv_v_f_f32m1(
+        -std::numeric_limits<float>::infinity(), __riscv_vsetvl_e32m1(1));
+    vfloat32m1_t v_max_red =
+        __riscv_vfredmax_vs_f32m4_f32m1(v_max, v_neg_inf, vl0);
+    const float maxv = __riscv_vfmv_f_s_f32m1_f32(v_max_red);
+
+    // Pass 2: out[k] = exp((in[k] - maxv) * beta), accumulate sum scalar.
+    float sum = 0.0f;
+    for (int k = 0; k < logit_size; ++k) {
+      const float e = std::exp((in[k] - maxv) * beta);
+      out[k] = e;
+      sum += e;
+    }
+
+    // Pass 3: vector normalize.
+    const float inv_sum = 1.0f / sum;
+    {
+      float* p = out;
+      size_t r = static_cast<size_t>(logit_size);
+      while (r > 0) {
+        size_t vl = __riscv_vsetvl_e32m4(r);
+        vfloat32m4_t v = __riscv_vle32_v_f32m4(p, vl);
+        v = __riscv_vfmul_vf_f32m4(v, inv_sum, vl);
+        __riscv_vse32_v_f32m4(p, v, vl);
+        p += vl; r -= vl;
+      }
+    }
+  }
+  return;
+#else
   const MatrixMap<const float> in_mat(input_data + logit_size * start_batch,
                                       logit_size, end_batch - start_batch);
   MatrixMap<float> out_mat(output_data + logit_size * start_batch, logit_size,
@@ -3632,6 +3686,7 @@ inline void SoftmaxImpl(const SoftmaxParams& params,
   Eigen::Array<float, 1, Eigen::Dynamic> scale =
       out_mat.array().colwise().sum().inverse();
   out_mat.array().rowwise() *= scale;
+#endif
 }
 
 struct SoftmaxWorkerTask : cpu_backend_threadpool::Task {
@@ -4282,6 +4337,26 @@ template <typename T>
 inline void Tanh(const RuntimeShape& input_shape, const T* input_data,
                  const RuntimeShape& output_shape, T* output_data) {
   ruy::profiler::ScopeLabel label("Tanh");
+#if defined(__riscv_vector)
+  if constexpr (std::is_same_v<T, float>) {
+    // RVSPOC S2601: vector load/store with scalar tanhf per element.
+    // Same hybrid as Logistic — vexp polynomial would replace the scalar
+    // inner; for now correctness + coverage matter more than perf.
+    const int size = input_shape.FlatSize();
+    const float* in = reinterpret_cast<const float*>(input_data);
+    float* out = reinterpret_cast<float*>(output_data);
+    int i = 0;
+    while (i < size) {
+      size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+      float buf[64];
+      __riscv_vse32_v_f32m4(buf, __riscv_vle32_v_f32m4(in + i, vl), vl);
+      for (size_t j = 0; j < vl; ++j) buf[j] = std::tanh(buf[j]);
+      __riscv_vse32_v_f32m4(out + i, __riscv_vle32_v_f32m4(buf, vl), vl);
+      i += vl;
+    }
+    return;
+  }
+#endif
   auto input_map = MapAsVector(input_data, input_shape);
   auto output_map = MapAsVector(output_data, output_shape);
   output_map.array() = input_map.array().tanh();
