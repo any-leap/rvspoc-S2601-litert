@@ -7644,6 +7644,20 @@ inline void PReluScalarBroadcast(int size, const ArithmeticParams& params,
     vst1q_f32(output_data + i, result);
   }
 #endif  // USE_NEON
+  // RVSPOC S2601: PReLU = x >= 0 ? x : x * alpha. Computed as
+  // result = (x * alpha) merged with x where x >= 0, using mask-merge.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vfloat32m4_t v_in = __riscv_vle32_v_f32m4(input_data + i, vl);
+    vfloat32m4_t v_neg = __riscv_vfmul_vf_f32m4(v_in, alpha, vl);
+    // Mask of lanes where input >= 0
+    vbool8_t v_pos = __riscv_vmfge_vf_f32m4_b8(v_in, 0.0f, vl);
+    vfloat32m4_t v_out = __riscv_vmerge_vvm_f32m4(v_neg, v_in, v_pos, vl);
+    __riscv_vse32_v_f32m4(output_data + i, v_out, vl);
+    i += vl;
+  }
+#endif
   for (; i < size; ++i) {
     const float input = input_data[i];
     output_data[i] = input >= 0.f ? input : input * alpha;
@@ -7698,6 +7712,19 @@ inline void PReluElementWise(int flat_size, const ArithmeticParams& params,
     vst1q_f32(output_data + i, result);
   }
 #endif  // USE_NEON
+  // RVSPOC S2601: per-element alpha variant of PReLU.
+#ifdef USE_RVV
+  while (i < flat_size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(flat_size - i));
+    vfloat32m4_t v_in = __riscv_vle32_v_f32m4(input_data + i, vl);
+    vfloat32m4_t v_alpha = __riscv_vle32_v_f32m4(alpha_data + i, vl);
+    vfloat32m4_t v_neg = __riscv_vfmul_vv_f32m4(v_in, v_alpha, vl);
+    vbool8_t v_pos = __riscv_vmfge_vf_f32m4_b8(v_in, 0.0f, vl);
+    vfloat32m4_t v_out = __riscv_vmerge_vvm_f32m4(v_neg, v_in, v_pos, vl);
+    __riscv_vse32_v_f32m4(output_data + i, v_out, vl);
+    i += vl;
+  }
+#endif
   for (; i < flat_size; ++i) {
     const float input = input_data[i];
     const float alpha = alpha_data[i];
