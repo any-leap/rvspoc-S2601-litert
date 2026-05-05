@@ -7430,6 +7430,16 @@ inline void MaximumElementwise(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, max_data);
   }
 #endif  // USE_NEON
+  // RVSPOC S2601: vector max.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e8m4(static_cast<size_t>(size - i));
+    vint8m4_t a = __riscv_vle8_v_i8m4(input1_data + i, vl);
+    vint8m4_t b = __riscv_vle8_v_i8m4(input2_data + i, vl);
+    __riscv_vse8_v_i8m4(output_data + i, __riscv_vmax_vv_i8m4(a, b, vl), vl);
+    i += vl;
+  }
+#endif
   for (; i < size; ++i) {
     const int8_t input1_val = input1_data[i];
     const int8_t input2_val = input2_data[i];
@@ -7474,6 +7484,16 @@ inline void MinimumElementwise(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, min_data);
   }
 #endif  // USE_NEON
+  // RVSPOC S2601: vector min.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e8m4(static_cast<size_t>(size - i));
+    vint8m4_t a = __riscv_vle8_v_i8m4(input1_data + i, vl);
+    vint8m4_t b = __riscv_vle8_v_i8m4(input2_data + i, vl);
+    __riscv_vse8_v_i8m4(output_data + i, __riscv_vmin_vv_i8m4(a, b, vl), vl);
+    i += vl;
+  }
+#endif
   for (; i < size; ++i) {
     const int8_t input1_val = input1_data[i];
     const int8_t input2_val = input2_data[i];
