@@ -40,4 +40,9 @@ cmake -G Ninja \
 # See GOT-002: LiteRT cc1plus is RAM-hungry; cap parallelism for Docker VM.
 BUILD_JOBS="${BUILD_JOBS:-4}"
 echo "Building with -j${BUILD_JOBS} (override with BUILD_JOBS=N)"
-cmake --build . -j"${BUILD_JOBS}" --target benchmark_model
+# benchmark_model + the two RVSPOC verification utilities. SUBMISSION.md /
+# verify_model_outputs.sh / run_imagenet_eval.sh all expect these to be
+# built; building them in one shot avoids surprising follow-up failures
+# (Copilot review #8 / #16).
+cmake --build . -j"${BUILD_JOBS}" --target \
+    benchmark_model rvspoc_model_output_dumper rvspoc_imagenet_eval

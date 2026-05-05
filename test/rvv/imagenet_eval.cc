@@ -24,6 +24,7 @@
 // Center-crops then resizes to the model's expected (H, W).
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -52,6 +53,26 @@
   } while (0)
 
 namespace {
+
+// Center-crop a uint8 image to a square of side min(h,w), in-place pointer
+// + new dims (no copy). Implements the standard ImageNet pre-process step
+// before resize.
+void CenterCropSquare(const uint8_t*& in, int& in_h, int& in_w, int channels,
+                     std::vector<uint8_t>& tmp) {
+  const int side = std::min(in_h, in_w);
+  if (side == in_h && side == in_w) return;
+  const int y0 = (in_h - side) / 2;
+  const int x0 = (in_w - side) / 2;
+  tmp.resize(static_cast<size_t>(side) * side * channels);
+  for (int y = 0; y < side; ++y) {
+    std::memcpy(&tmp[(y * side) * channels],
+                in + ((y0 + y) * in_w + x0) * channels,
+                static_cast<size_t>(side) * channels);
+  }
+  in = tmp.data();
+  in_h = side;
+  in_w = side;
+}
 
 // Bilinear resize uint8 image to (out_h, out_w, channels). Equivalent to
 // what tflite's image preprocessing does — keeps the driver self-contained
@@ -158,10 +179,12 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: %s <model.tflite> <manifest.csv> [label_offset]\n"
                  "  manifest.csv: lines of  image_path,label_index\n"
-                 "  label_offset: subtract this from manifest labels before\n"
-                 "                comparing to argmax (default 0; use 1 if\n"
-                 "                model has 1001-class output where idx 0\n"
-                 "                is 'background' but labels are 1-indexed).\n",
+                 "  label_offset: ADD this to manifest labels before comparing\n"
+                 "                to the model argmax. Use 1 when the manifest\n"
+                 "                holds standard 0-based ImageNet labels and\n"
+                 "                the model has a 1001-class output (idx 0 is\n"
+                 "                'background'). Default 0 means the manifest\n"
+                 "                already encodes the model's index space.\n",
                  argv[0]);
     return 1;
   }
@@ -195,10 +218,20 @@ int main(int argc, char** argv) {
   std::printf("Manifest: %zu samples (label_offset=%d)\n", samples.size(),
               label_offset);
 
+  // Quantization params for int8/uint8 input — the model's calibrated
+  // (scale, zero_point) maps stored quantized values back to the float
+  // pixel range it was trained on (typically [-1, 1] or [0, 1]). Without
+  // using these, INT8 evaluations on models with non-default zp/scale
+  // get the wrong input distribution (Copilot review #15).
+  const float in_scale =
+      (in_t->params.scale != 0.0f) ? in_t->params.scale : 1.0f;
+  const int in_zp = in_t->params.zero_point;
+
   int n_evaluated = 0;
   int n_top1 = 0;
   int n_top5 = 0;
   std::vector<uint8_t> resized(in_h * in_w * in_c);
+  std::vector<uint8_t> cropped_tmp;
 
   for (const auto& s : samples) {
     int img_w = 0, img_h = 0, img_c = 0;
@@ -208,7 +241,13 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "  skip (decode failed): %s\n", s.path.c_str());
       continue;
     }
-    ResizeBilinearU8(pixels, img_h, img_w, 3, in_h, in_w, resized.data());
+    // Standard ImageNet preprocessing: center-crop to square first, then
+    // bilinear-resize to model input. Without the crop step, evaluating a
+    // non-square image distorts geometry (Copilot review #14).
+    const uint8_t* crop_in = pixels;
+    int crop_h = img_h, crop_w = img_w;
+    CenterCropSquare(crop_in, crop_h, crop_w, 3, cropped_tmp);
+    ResizeBilinearU8(crop_in, crop_h, crop_w, 3, in_h, in_w, resized.data());
     stbi_image_free(pixels);
 
     // Fill the input tensor in the model's expected layout.
@@ -217,13 +256,23 @@ int main(int argc, char** argv) {
       for (int i = 0; i < in_h * in_w * in_c; ++i)
         dst[i] = (resized[i] / 127.5f) - 1.0f;
     } else if (in_t->type == kTfLiteUInt8) {
+      // uint8 quant: float_pixel ≈ in_scale * (q - in_zp). Solve for q:
+      // q = clamp(round(float_pixel/in_scale) + in_zp). The float_pixel
+      // we want to feed is a [0,255] uint8 already scaled to [-1,1] like
+      // the float path: (resized[i]/127.5 - 1.0).
       uint8_t* dst = interpreter->typed_input_tensor<uint8_t>(0);
-      std::memcpy(dst, resized.data(), in_h * in_w * in_c);
+      for (int i = 0; i < in_h * in_w * in_c; ++i) {
+        const float f = (resized[i] / 127.5f) - 1.0f;
+        const int q = static_cast<int>(std::lround(f / in_scale)) + in_zp;
+        dst[i] = static_cast<uint8_t>(std::clamp(q, 0, 255));
+      }
     } else if (in_t->type == kTfLiteInt8) {
       int8_t* dst = interpreter->typed_input_tensor<int8_t>(0);
-      // uint8 [0,255] → int8 [-128,127] by subtracting 128.
-      for (int i = 0; i < in_h * in_w * in_c; ++i)
-        dst[i] = static_cast<int8_t>(static_cast<int>(resized[i]) - 128);
+      for (int i = 0; i < in_h * in_w * in_c; ++i) {
+        const float f = (resized[i] / 127.5f) - 1.0f;
+        const int q = static_cast<int>(std::lround(f / in_scale)) + in_zp;
+        dst[i] = static_cast<int8_t>(std::clamp(q, -128, 127));
+      }
     } else {
       std::fprintf(stderr, "Unsupported input dtype %d\n", in_t->type);
       return 2;
@@ -233,7 +282,10 @@ int main(int argc, char** argv) {
     const TfLiteTensor* out_t = interpreter->tensor(interpreter->outputs()[0]);
     int top5[5] = {-1, -1, -1, -1, -1};
     int pred1 = Argmax(out_t, top5);
-    const int label = s.label - label_offset;
+    // Add (not subtract) the offset to map manifest's index space to the
+    // model's. Convention: label_offset=1 for 0-based ImageNet labels
+    // against a 1001-class MobileNet output (Copilot review #18).
+    const int label = s.label + label_offset;
     if (pred1 == label) ++n_top1;
     for (int k = 0; k < 5; ++k)
       if (top5[k] == label) {

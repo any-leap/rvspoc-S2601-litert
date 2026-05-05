@@ -35,4 +35,7 @@ cmake -G Ninja \
   "$REPO_ROOT/tflite"
 
 BUILD_JOBS="${BUILD_JOBS:-4}"
-cmake --build . -j"${BUILD_JOBS}" --target rvspoc_model_output_dumper benchmark_model
+# Mirror the RVV build target list so the verify / eval scripts can
+# diff RVV vs scalar end-to-end (Copilot review #9).
+cmake --build . -j"${BUILD_JOBS}" --target \
+    benchmark_model rvspoc_model_output_dumper rvspoc_imagenet_eval

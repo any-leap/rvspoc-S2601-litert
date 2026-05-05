@@ -72,12 +72,16 @@ template <typename LhsScalar, typename RhsScalar, typename AccumScalar,
 struct GemmImpl : detail::GemmImplUsingRuy<LhsScalar, RhsScalar, AccumScalar,
                                            DstScalar, quantization_flavor> {};
 
-// RVSPOC S2601: override the FP32 GemmImpl on RV64GCV to bypass ruy's
-// scalar StandardCpp fallback (ruy has no upstream RISC-V path). Wraps
-// GemmImplUsingRvv which itself layout-checks and falls back to ruy if
-// the matrix orientations don't match what optimized_ops::Conv emits —
-// so this is safe to override unconditionally.
-#if defined(__riscv_vector)
+// RVSPOC S2601: override the GemmImpl on RV64GCV to bypass ruy's scalar
+// StandardCpp fallback (ruy has no upstream RISC-V path). Each
+// specialization layout-checks at runtime and falls back to ruy if the
+// matrix orientations don't match what optimized_ops::Conv emits.
+//
+// Gated on TFLITE_WITH_RUY: when ruy is disabled the alternate Eigen /
+// gemmlowp specializations below are emitted instead, and our overrides
+// would collide with them (Copilot review #1). Spec-required builds
+// have ruy on, but keep this gate so non-ruy builds still compile.
+#if defined(__riscv_vector) && defined(TFLITE_WITH_RUY)
 template <>
 struct GemmImpl<float, float, float, float,
                 QuantizationFlavor::kFloatingPoint>

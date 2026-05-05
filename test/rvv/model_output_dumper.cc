@@ -121,13 +121,24 @@ int main(int argc, char** argv) {
 
   std::printf("model=%s seed=%u\n", model_path, seed);
 
-  // Fill every input tensor with deterministic bytes.
+  // Fill every input tensor with deterministic data. For FP32 we used to
+  // dump xorshift bytes straight into the buffer, which can produce NaN/
+  // Inf bit patterns (Copilot review #11). Now generate u8 first then
+  // map to a sane numeric range per dtype.
   for (int i : interpreter->inputs()) {
     TfLiteTensor* t = interpreter->tensor(i);
     std::printf("  input  #%d %s ", i, TypeName(t->type));
     PrintShape(t->dims);
     std::printf(" bytes=%zu\n", t->bytes);
-    FillBytes(reinterpret_cast<uint8_t*>(t->data.raw), t->bytes, seed + i);
+    if (t->type == kTfLiteFloat32) {
+      std::vector<uint8_t> u8buf(t->bytes / 4);
+      FillBytes(u8buf.data(), u8buf.size(), seed + i);
+      float* dst = reinterpret_cast<float*>(t->data.raw);
+      for (size_t k = 0; k < u8buf.size(); ++k)
+        dst[k] = (u8buf[k] / 127.5f) - 1.0f;  // pixel-like [-1, 1]
+    } else {
+      FillBytes(reinterpret_cast<uint8_t*>(t->data.raw), t->bytes, seed + i);
+    }
   }
 
   CHK(interpreter->Invoke() == kTfLiteOk);
