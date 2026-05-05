@@ -15,6 +15,18 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_NEON_CHECK_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_NEON_CHECK_H_
 
+// RVSPOC S2601: also pull in the RVV gating header here so that any
+// translation unit that already includes neon_check.h (without going
+// through cpu_check.h) gets USE_RVV correctly defined on RV64GCV
+// targets. Several .cc files in tflite/kernels/ (reduce.cc, pooling.cc,
+// quantize.cc, maximum_minimum.cc, ...) include neon_check.h directly
+// — without this line the RVV blocks in optimized_ops.h / reduce.h /
+// integer_ops/{mean,lut}.h would silently compile out for those files
+// on RVV targets (Copilot review #1 / #2 / #3 of round 2).
+// The header is a no-op when __riscv_vector is undefined, so this is
+// safe on ARM / x86 builds.
+#include "tflite/kernels/internal/optimized/rvv_check.h"
+
 #if defined(__ARM_NEON__) || defined(__ARM_NEON)
 #define USE_NEON
 #include <arm_neon.h>  // IWYU pragma: export

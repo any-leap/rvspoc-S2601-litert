@@ -20,6 +20,9 @@ limitations under the License.
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/common.h"
+// RVSPOC S2601: ensure USE_RVV is defined regardless of caller include
+// order (Copilot review #3 of round 2).
+#include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 
 namespace tflite {

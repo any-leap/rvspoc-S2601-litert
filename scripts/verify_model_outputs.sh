@@ -97,20 +97,22 @@ for m in "${MODELS[@]}"; do
     echo "    scalar $(echo "$sca_top" | head -1)"
   fi
 
-  # Compare full output tensor bytes from the dumped hex traces. The
-  # dumper truncates at 32 bytes for hex-printing, but this bytewise
-  # equality check still uses every dumped tensor (typically all output
-  # heads). For FP32 we expect byte differences (FMA accum order); for
-  # INT8 we expect byte-exact agreement (Copilot review #12 / #17).
-  rvv_raw=$(grep -E "raw\[0:" "$rvv_out" || true)
-  sca_raw=$(grep -E "raw\[0:" "$sca_out" || true)
+  # Compare FNV-1a 64-bit digests over the full output tensors (Copilot
+  # review #4 of round 2 — the previous "raw[0:32]" hex-only check missed
+  # any divergence past byte 31). For FP32 we expect digest mismatch
+  # (FMA accumulation order differs across vector reductions). For INT8
+  # the spec gates each algorithm-level diff at ≤1 LSB which is *not* the
+  # same as bit-exact tensors — we report mismatch as informational, not
+  # blocking (Copilot review #5 of round 2).
+  rvv_dig=$(grep -E "digest=" "$rvv_out" || true)
+  sca_dig=$(grep -E "digest=" "$sca_out" || true)
   raw_match=0
-  if [ "$rvv_raw" = "$sca_raw" ]; then
-    echo "  Raw bytes:     IDENTICAL"
+  if [ "$rvv_dig" = "$sca_dig" ] && [ -n "$rvv_dig" ]; then
+    echo "  Full digest:   IDENTICAL across all output tensors"
     raw_match=1
   else
-    echo "  Raw bytes:     DIFFER (expected for FP32; should match for INT8)"
-    diff <(echo "$rvv_raw") <(echo "$sca_raw") 2>&1 | head -6 | sed 's/^/    /' || true
+    echo "  Full digest:   DIFFER (FP32: expected; INT8: within spec ≤1 LSB tolerance)"
+    diff <(echo "$rvv_dig") <(echo "$sca_dig") 2>&1 | head -6 | sed 's/^/    /' || true
   fi
 
   if is_detection "$m"; then
@@ -127,7 +129,9 @@ for m in "${MODELS[@]}"; do
   case "$m" in *_quant*) is_int8=1 ;; esac
   if [ "$top1_ok" = "1" ]; then
     if [ "$is_int8" = "1" ] && [ "$raw_match" = "0" ]; then
-      echo "  → INT8 raw bytes differ — flagged but spec ≤1 LSB tolerance applies"
+      echo "  → INT8 full-tensor digest differs — INFORMATIONAL only;"
+      echo "    spec gates at ≤1 LSB, not bit-exact. Use scripts/run_imagenet_eval.sh"
+      echo "    for the rigorous Top-1 check that respects the spec threshold."
     fi
     passes=$((passes + 1))
   else

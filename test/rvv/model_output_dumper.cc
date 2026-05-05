@@ -143,7 +143,9 @@ int main(int argc, char** argv) {
 
   CHK(interpreter->Invoke() == kTfLiteOk);
 
-  // Dump every output tensor: type, shape, first 32 raw bytes, top-5.
+  // Dump every output tensor: type, shape, first 32 raw bytes (visual),
+  // FNV-1a 64-bit digest of the full tensor (Copilot review #4 of round
+  // 2 — head-only print missed regressions past byte 31), and top-5.
   for (int i : interpreter->outputs()) {
     const TfLiteTensor* t = interpreter->tensor(i);
     std::printf("  output #%d %s ", i, TypeName(t->type));
@@ -154,6 +156,16 @@ int main(int argc, char** argv) {
     std::printf("    raw[0:%zu]=", head);
     PrintHexHead(p, head);
     std::printf("\n");
+    // FNV-1a 64-bit over every byte of the tensor. Two builds producing
+    // the same digest implies bit-exact output across the whole tensor;
+    // mismatch flags a regression past the visual hex window above.
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t k = 0; k < t->bytes; ++k) {
+      h ^= p[k];
+      h *= 0x100000001b3ull;
+    }
+    std::printf("    digest=%016lx (fnv1a64 over %zu bytes)\n",
+                static_cast<unsigned long>(h), t->bytes);
     const size_t elems = t->bytes / [&] {
       switch (t->type) {
         case kTfLiteFloat32: case kTfLiteInt32: return 4;

@@ -15,6 +15,11 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_REDUCE_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_REDUCE_H_
 
+// RVSPOC S2601: include cpu_check.h directly so the USE_RVV gate inside
+// this header doesn't depend on include order in callers (Copilot
+// review #2 of round 2).
+#include "tflite/kernels/internal/optimized/cpu_check.h"
+
 #include <stdint.h>
 
 #include <algorithm>
