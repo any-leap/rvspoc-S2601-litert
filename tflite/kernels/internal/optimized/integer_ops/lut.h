@@ -20,6 +20,9 @@ limitations under the License.
 #if __aarch64__ && __clang__
 #include <arm_neon.h>
 #endif
+#if defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
 
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 
@@ -50,6 +53,21 @@ inline void LookupTable(const uint8_t* input_data, int num_elements,
     vst1q_u8(output_data + i, output);
   }
   // Postamble and non-ARM64 code: simple for loop.
+#endif
+  // RVSPOC S2601: vectorised LUT via indexed memory load. Each lane
+  // loads lut[input[i]] using the input byte as an offset from `lut`.
+  // No need to preload the table — the hardware handles per-lane
+  // gather, which is the natural fit for arbitrary 256-entry LUTs.
+#if defined(__riscv_vector)
+  while (i < num_elements) {
+    size_t vl = __riscv_vsetvl_e8m1(static_cast<size_t>(num_elements - i));
+    vuint8m1_t v_idx = __riscv_vle8_v_u8m1(input_data + i, vl);
+    // vluxei8 wants a vuint8m1_t of byte offsets; output is u8 fetched
+    // from base+offset for each lane.
+    vuint8m1_t v_out = __riscv_vluxei8_v_u8m1(lut, v_idx, vl);
+    __riscv_vse8_v_u8m1(output_data + i, v_out, vl);
+    i += vl;
+  }
 #endif
   for (; i < num_elements; ++i) {
     output_data[i] = lut[input_data[i]];

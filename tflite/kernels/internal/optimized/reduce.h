@@ -139,6 +139,38 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
     }
 #endif  // USE_NEON
 
+    // RVSPOC S2601: vector accumulate (zext u8 → i32) over (in_h, in_w),
+    // scalar requant per element. Same pattern as integer_ops/mean.h's
+    // RVV block but with zero-extend for unsigned input.
+#ifdef USE_RVV
+    while (out_d < end_depth) {
+      size_t vl = __riscv_vsetvl_e32m4(
+          static_cast<size_t>(end_depth - out_d));
+      vint32m4_t v_acc = __riscv_vmv_v_x_i32m4(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const uint8_t* p =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          vuint8m1_t v_in_u8 = __riscv_vle8_v_u8m1(p, vl);
+          vuint32m4_t v_in_u32 = __riscv_vzext_vf4_u32m4(v_in_u8, vl);
+          v_acc = __riscv_vadd_vv_i32m4(
+              v_acc,
+              __riscv_vreinterpret_v_u32m4_i32m4(v_in_u32), vl);
+        }
+      }
+      int32_t acc_buf[64];
+      __riscv_vse32_v_i32m4(acc_buf, v_acc, vl);
+      for (size_t j = 0; j < vl; ++j) {
+        int r = MultiplyByQuantizedMultiplier(acc_buf[j], multiplier, shift);
+        r += bias;
+        r = std::min(std::max(r, kMinValue), kMaxValue);
+        output_data[Offset(output_shape, out_b, 0, 0, out_d + j)] =
+            static_cast<uint8_t>(r);
+      }
+      out_d += vl;
+    }
+#endif
+
     for (; out_d < end_depth; ++out_d) {
       int acc = 0;
       for (int in_h = 0; in_h < input_height; ++in_h) {

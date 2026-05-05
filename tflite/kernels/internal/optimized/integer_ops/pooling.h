@@ -109,6 +109,21 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 vst1_s8(acc + channel, acc_reg);
               }
 #endif
+              // RVSPOC S2601: vector max-reduce.
+#ifdef USE_RVV
+              while (channel < tranche_depth) {
+                size_t vl = __riscv_vsetvl_e8m4(
+                    static_cast<size_t>(tranche_depth - channel));
+                vint8m4_t v_acc =
+                    __riscv_vle8_v_i8m4(acc + channel, vl);
+                vint8m4_t v_in =
+                    __riscv_vle8_v_i8m4(input_channel_ptr, vl);
+                v_acc = __riscv_vmax_vv_i8m4(v_acc, v_in, vl);
+                __riscv_vse8_v_i8m4(acc + channel, v_acc, vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
+#endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
               }
@@ -130,6 +145,18 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmin_s8(a, vdup_n_s8(params.quantized_activation_max));
             a = vmax_s8(a, vdup_n_s8(params.quantized_activation_min));
             vst1_s8(output_ptr + channel, a);
+          }
+#endif
+          // RVSPOC S2601: vector clamp + store.
+#ifdef USE_RVV
+          while (channel < tranche_depth) {
+            size_t vl = __riscv_vsetvl_e8m4(
+                static_cast<size_t>(tranche_depth - channel));
+            vint8m4_t a = __riscv_vle8_v_i8m4(acc + channel, vl);
+            a = __riscv_vmin_vx_i8m4(a, params.quantized_activation_max, vl);
+            a = __riscv_vmax_vx_i8m4(a, params.quantized_activation_min, vl);
+            __riscv_vse8_v_i8m4(output_ptr + channel, a, vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
@@ -233,6 +260,23 @@ inline bool AveragePool(const PoolParams& params,
                 }
               }
 #endif
+              // RVSPOC S2601: vector accumulate (sext i8 → i32 + vadd).
+#ifdef USE_RVV
+              while (channel < tranche_depth) {
+                size_t vl = __riscv_vsetvl_e32m4(
+                    static_cast<size_t>(tranche_depth - channel));
+                vint8m1_t v_in_i8 =
+                    __riscv_vle8_v_i8m1(input_channel_ptr, vl);
+                vint32m4_t v_in_i32 =
+                    __riscv_vsext_vf4_i32m4(v_in_i8, vl);
+                vint32m4_t v_acc =
+                    __riscv_vle32_v_i32m4(acc + channel, vl);
+                v_acc = __riscv_vadd_vv_i32m4(v_acc, v_in_i32, vl);
+                __riscv_vse32_v_i32m4(acc + channel, v_acc, vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
+#endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] += *input_channel_ptr++;
               }
@@ -255,6 +299,31 @@ inline bool AveragePool(const PoolParams& params,
             buf8 = vmin_s8(buf8, vdup_n_s8(params.quantized_activation_max));
             buf8 = vmax_s8(buf8, vdup_n_s8(params.quantized_activation_min));
             vst1_s8(output_ptr + channel, buf8);
+          }
+#endif
+          // RVSPOC S2601: rounded division by filter_count + saturating
+          // narrow + clamp. Division semantics differ for positive vs
+          // negative numerators (round half away from zero), so we keep
+          // the rounding-divide step scalar and only vectorise the load
+          // / clamp / store.
+#ifdef USE_RVV
+          while (channel < tranche_depth) {
+            size_t vl = __riscv_vsetvl_e8m1(
+                static_cast<size_t>(tranche_depth - channel));
+            int8_t obuf[64];  // VLMAX at vlen=512, e8m1 = 64
+            for (size_t j = 0; j < vl; ++j) {
+              int32_t a = acc[channel + j];
+              const int16_t r =
+                  a > 0 ? (a + filter_count / 2) / filter_count
+                        : (a - filter_count / 2) / filter_count;
+              int16_t r2 = std::max<int16_t>(
+                  r, params.quantized_activation_min);
+              r2 = std::min<int16_t>(r2, params.quantized_activation_max);
+              obuf[j] = static_cast<int8_t>(r2);
+            }
+            __riscv_vse8_v_i8m1(output_ptr + channel,
+                                 __riscv_vle8_v_i8m1(obuf, vl), vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {

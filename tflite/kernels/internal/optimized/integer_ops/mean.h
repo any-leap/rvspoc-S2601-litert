@@ -125,6 +125,35 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
     }
 #endif  // USE_NEON
 
+    // RVSPOC S2601: vector accumulate over (in_h, in_w) for vl depth lanes,
+    // then scalar requant per element (matches scalar fallback for ≤1 LSB).
+#ifdef USE_RVV
+    while (out_d < end_depth) {
+      size_t vl = __riscv_vsetvl_e32m4(
+          static_cast<size_t>(end_depth - out_d));
+      vint32m4_t v_acc = __riscv_vmv_v_x_i32m4(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const int8_t* p =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          vint8m1_t v_in_i8 = __riscv_vle8_v_i8m1(p, vl);
+          vint32m4_t v_in_i32 = __riscv_vsext_vf4_i32m4(v_in_i8, vl);
+          v_acc = __riscv_vadd_vv_i32m4(v_acc, v_in_i32, vl);
+        }
+      }
+      int32_t acc_buf[64];  // VLMAX e32m4 at vlen=512
+      __riscv_vse32_v_i32m4(acc_buf, v_acc, vl);
+      for (size_t j = 0; j < vl; ++j) {
+        int32 r = MultiplyByQuantizedMultiplier(acc_buf[j], multiplier, shift);
+        r += bias;
+        r = std::min(std::max(r, kMinValue), kMaxValue);
+        output_data[Offset(output_shape, out_b, 0, 0, out_d + j)] =
+            static_cast<int8_t>(r);
+      }
+      out_d += vl;
+    }
+#endif
+
     for (; out_d < end_depth; ++out_d) {
       int acc = 0;
       for (int in_h = 0; in_h < input_height; ++in_h) {
