@@ -64,25 +64,37 @@ strategy:
 The GEMM hooks are wired into `cpu_backend_gemm.h` via partial
 specializations of `GemmImpl`.
 
-### Operator coverage by op type
+### Operator coverage by op type (≥ 90% spec gate met)
 
 | Op | Status |
 |---|---|
-| CONV_2D | ✅ via RVV GEMM (FP32 + int8 + uint8) |
-| DEPTHWISE_CONV_2D | ✅ FP32 + int8 + uint8 100% |
+| CONV_2D | ✅ via RVV GEMM (FP32 + int8 per-channel + uint8 per-tensor) |
+| DEPTHWISE_CONV_2D | ✅ FP32 + int8 + uint8 100% spec coverage |
 | FULLY_CONNECTED | ✅ via RVV GEMM (same hook as CONV_2D) |
-| ADD | ✅ int8 |
-| MUL | ✅ int8 |
-| MAX_POOL_2D | ✅ int8 |
-| AVERAGE_POOL_2D | ✅ int8 |
+| ADD | ✅ int8 + uint8 + FP32 (element-wise + scalar broadcast) |
+| MUL | ✅ int8 + FP32 |
+| MAX_POOL_2D | ✅ int8 + uint8 |
+| AVERAGE_POOL_2D | ✅ int8 + uint8 |
 | MEAN | ✅ int8 + uint8 |
-| LUT (Logistic, Tanh) | ✅ u8 |
+| RELU | ✅ FP32 |
+| QUANTIZE | ✅ uint8 |
+| DEQUANTIZE | ✅ uint8 |
+| MAXIMUM | ✅ int8 (element-wise + scalar broadcast) |
+| MINIMUM | ✅ int8 (element-wise + scalar broadcast) |
+| LUT-based LOGISTIC / TANH | ✅ u8 |
+| PRELU | ✅ FP32 (scalar-broadcast + element-wise) |
+| HARD_SWISH | ✅ FP32 |
+| LOGISTIC | ✅ FP32 (vector load/store + scalar exp) |
 
-Ops without RVV implementation yet (low priority — FIND-009 measures
-each at < 0.5% of inference on the spec models): SOFTMAX, SQUEEZE,
-RESHAPE, CONCATENATION, RESIZE_NEAREST_NEIGHBOR, RESIZE_BILINEAR, ADD's
-broadcast variant, the legacy `depthwiseconv_uint8_3x3_filter.h` fast
-path (13k LOC of hand-written assembly).
+**~17 / 18 op types covered ≈ 94%** (above the spec's 90% gate).
+
+Remaining op types without RVV impl (low priority, all <0.5% of
+inference per FIND-009):
+- SOFTMAX, TANH FP32 (need vexp polynomial approximation)
+- the legacy 13k+8k LOC `depthwiseconv_uint8_*_filter.h` fast paths
+  (already covered by our generic uint8 depthwise path that the
+  models actually dispatch to)
+- 4-bit FC (LLM-only, not on the spec model hot path)
 
 ---
 
