@@ -132,6 +132,34 @@ static void DoDepthwiseConvHybridGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
 #endif  // USE_NEON
 
+  // RVSPOC S2601: same 22 specs (RVV equivalents are defined in
+  // integer_ops/depthwise_conv.h and visible to this file via the
+  // shared template definitions).
+#ifdef USE_RVV
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 12, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 16, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 16)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 20)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 32)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 4, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
+#endif  // USE_RVV
+
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {
     row_accum_func = QuantizedDepthwiseConvAccumRowGeneric;
@@ -236,6 +264,32 @@ static void DoDepthwiseConvHybridGeneral(
             }
           }
 #endif  // USE_NEON
+          // RVSPOC S2601: vector i32→f32 convert + per-channel scale +
+          // bias + clamp.
+#ifdef USE_RVV
+          while (c < output_depth) {
+            size_t vl = __riscv_vsetvl_e32m4(
+                static_cast<size_t>(output_depth - c));
+            vfloat32m4_t v_scale =
+                __riscv_vle32_v_f32m4(per_channel_scales + c, vl);
+            vfloat32m4_t v_bias = __riscv_vle32_v_f32m4(bias_data + c, vl);
+            for (int n = 0; n < num_output_pixels; ++n) {
+              int loc = n * output_depth + c;
+              vint32m4_t v_acc = __riscv_vle32_v_i32m4(acc_buffer + loc, vl);
+              vfloat32m4_t v_facc =
+                  __riscv_vfcvt_f_x_v_f32m4(v_acc, vl);
+              v_facc = __riscv_vfmul_vv_f32m4(v_facc, v_scale, vl);
+              v_facc = __riscv_vfmul_vf_f32m4(v_facc, input_scale, vl);
+              v_facc = __riscv_vfadd_vv_f32m4(v_facc, v_bias, vl);
+              v_facc = __riscv_vfmax_vf_f32m4(v_facc,
+                                              output_activation_min, vl);
+              v_facc = __riscv_vfmin_vf_f32m4(v_facc,
+                                              output_activation_max, vl);
+              __riscv_vse32_v_f32m4(output_ptr + loc, v_facc, vl);
+            }
+            c += vl;
+          }
+#endif  // USE_RVV
 
           for (; c < target_output_depth; c++) {
             for (int n = 0; n < num_output_pixels; ++n) {
