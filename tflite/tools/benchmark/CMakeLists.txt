@@ -125,3 +125,15 @@ add_executable(rvspoc_model_output_dumper
 )
 target_link_libraries(rvspoc_model_output_dumper tensorflow-lite)
 target_compile_options(rvspoc_model_output_dumper PRIVATE -O3)
+
+# RVSPOC S2601: ImageNet Top-1 evaluation driver. Self-contained
+# (uses bundled stb_image.h for JPEG/PNG/BMP decoding); link only
+# against tensorflow-lite.
+add_executable(rvspoc_imagenet_eval
+  "${TFLITE_SOURCE_DIR}/../test/rvv/imagenet_eval.cc"
+)
+target_link_libraries(rvspoc_imagenet_eval tensorflow-lite)
+target_compile_options(rvspoc_imagenet_eval PRIVATE -O3)
+target_include_directories(rvspoc_imagenet_eval PRIVATE
+  "${TFLITE_SOURCE_DIR}/../test/rvv"
+)
