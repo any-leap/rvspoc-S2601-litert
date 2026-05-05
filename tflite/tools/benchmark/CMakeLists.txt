@@ -118,22 +118,30 @@ target_link_libraries(benchmark_model
     ${TFLITE_BENCHMARK_LIBS}
 )
 
-# RVSPOC S2601: model output dumper, used to verify end-to-end model
-# numerics by diffing the same model run on RVV vs scalar builds.
-add_executable(rvspoc_model_output_dumper
-  "${TFLITE_SOURCE_DIR}/../test/rvv/model_output_dumper.cc"
-)
-target_link_libraries(rvspoc_model_output_dumper tensorflow-lite)
-target_compile_options(rvspoc_model_output_dumper PRIVATE -O3)
+# RVSPOC S2601: model output dumper + ImageNet Top-1 evaluation driver.
+# Both source files live under <repo_root>/test/rvv/. When this
+# CMakeLists is reached from the standalone rvspoc fork
+# TFLITE_SOURCE_DIR=.../tflite so .../tflite/../test/rvv is correct.
+# When reached from the integrated TF tree (rare here, but supported),
+# TFLITE_SOURCE_DIR=.../tensorflow/lite and the test dir doesn't exist
+# at the same relative position — guard with EXISTS so the build still
+# succeeds in that layout (Copilot review #6 / #7).
+set(_rvspoc_test_dir "${TFLITE_SOURCE_DIR}/../test/rvv")
+if(EXISTS "${_rvspoc_test_dir}/model_output_dumper.cc")
+  add_executable(rvspoc_model_output_dumper
+    "${_rvspoc_test_dir}/model_output_dumper.cc"
+  )
+  target_link_libraries(rvspoc_model_output_dumper tensorflow-lite)
+  target_compile_options(rvspoc_model_output_dumper PRIVATE -O3)
+endif()
 
-# RVSPOC S2601: ImageNet Top-1 evaluation driver. Self-contained
-# (uses bundled stb_image.h for JPEG/PNG/BMP decoding); link only
-# against tensorflow-lite.
-add_executable(rvspoc_imagenet_eval
-  "${TFLITE_SOURCE_DIR}/../test/rvv/imagenet_eval.cc"
-)
-target_link_libraries(rvspoc_imagenet_eval tensorflow-lite)
-target_compile_options(rvspoc_imagenet_eval PRIVATE -O3)
-target_include_directories(rvspoc_imagenet_eval PRIVATE
-  "${TFLITE_SOURCE_DIR}/../test/rvv"
-)
+if(EXISTS "${_rvspoc_test_dir}/imagenet_eval.cc")
+  add_executable(rvspoc_imagenet_eval
+    "${_rvspoc_test_dir}/imagenet_eval.cc"
+  )
+  target_link_libraries(rvspoc_imagenet_eval tensorflow-lite)
+  target_compile_options(rvspoc_imagenet_eval PRIVATE -O3)
+  target_include_directories(rvspoc_imagenet_eval PRIVATE
+    "${_rvspoc_test_dir}"
+  )
+endif()

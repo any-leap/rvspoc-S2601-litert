@@ -14,12 +14,23 @@
 # limitations under the License.
 find_package(Protobuf REQUIRED)
 
+# RVSPOC-S2601: layout autodetect (same idea as in
+# tflite/profiling/proto/CMakeLists.txt — Copilot review #5).
+if(EXISTS "${TFLITE_SOURCE_DIR}/../tflite/tools/benchmark/proto/benchmark_result.proto")
+  set(_RVSPOC_PROTO_ROOT "${TFLITE_SOURCE_DIR}/..")
+  set(_RVSPOC_PROTO_PFX "tflite")
+elseif(EXISTS "${TFLITE_SOURCE_DIR}/../../tensorflow/lite/tools/benchmark/proto/benchmark_result.proto")
+  set(_RVSPOC_PROTO_ROOT "${TFLITE_SOURCE_DIR}/../..")
+  set(_RVSPOC_PROTO_PFX "tensorflow/lite")
+else()
+  message(FATAL_ERROR "Cannot locate benchmark_result.proto under either standalone tflite/ or integrated tensorflow/lite/ layout.")
+endif()
+
 add_library(benchmark_result_proto benchmark_result.proto)
 
 list(APPEND benchmark_result_generated_files
-    ${CMAKE_BINARY_DIR}/tflite/tools/benchmark/proto/benchmark_result.pb.cc
-    ${CMAKE_BINARY_DIR}/tflite/tools/benchmark/proto/benchmark_result.pb.h
-    # RVSPOC-S2601: see tflite/profiling/proto/CMakeLists.txt for the same fix.
+    ${CMAKE_BINARY_DIR}/${_RVSPOC_PROTO_PFX}/tools/benchmark/proto/benchmark_result.pb.cc
+    ${CMAKE_BINARY_DIR}/${_RVSPOC_PROTO_PFX}/tools/benchmark/proto/benchmark_result.pb.h
     )
 
 # Generate benchmark_result.pb.cc and benchmark_result.pb.h from
@@ -28,7 +39,7 @@ list(APPEND benchmark_result_generated_files
 add_custom_command(
     OUTPUT ${benchmark_result_generated_files}
     COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-    ARGS --cpp_out=${CMAKE_BINARY_DIR} --proto_path=${TFLITE_SOURCE_DIR}/.. tflite/tools/benchmark/proto/benchmark_result.proto
+    ARGS --cpp_out=${CMAKE_BINARY_DIR} --proto_path=${_RVSPOC_PROTO_ROOT} ${_RVSPOC_PROTO_PFX}/tools/benchmark/proto/benchmark_result.proto
     DEPENDS ${Protobuf_PROTOC_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark_result.proto
 )
 

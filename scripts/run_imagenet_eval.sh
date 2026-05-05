@@ -68,7 +68,26 @@ sca_pct=$(echo "$sca_top1" | grep -oE "[0-9.]+%" | tr -d %)
 diff=$(python3 -c "print(abs($rvv_pct - $sca_pct))" 2>/dev/null || echo "?")
 echo "Top-1 absolute diff: ${diff}%"
 
-# FP32 gate is 0.1%; INT8 is 1%. We don't auto-detect dtype here —
-# print both gates for the operator to interpret.
-echo
-echo "Spec gates:  FP32 ≤ 0.1%   INT8 ≤ 1.0%"
+# Detect input dtype from the dumper output: dtype=1 → FP32, dtype=3 → uint8,
+# dtype=9 → int8. The driver header prints "Input: [...] dtype=<n>".
+dtype=$(grep -oE "dtype=[0-9]+" "$OUT_DIR/rvv.log" | head -1 | tr -d 'a-z=')
+case "$dtype" in
+  1)  threshold=0.1; quant_label="FP32" ;;
+  3|9) threshold=1.0; quant_label="INT8/UINT8" ;;
+  *)   threshold=1.0; quant_label="unknown→assuming INT8 budget" ;;
+esac
+echo "Detected: ${quant_label}  → spec threshold ≤ ${threshold}%"
+
+# Exit-code gate (Copilot review #19): non-zero if the absolute Top-1
+# delta exceeds the auto-detected per-spec threshold. Allows CI to use
+# this script as the actual gate rather than just informational.
+exit_code=$(python3 -c "
+d = $diff if '$diff' != '?' else float('inf')
+print(0 if d <= $threshold else 3)
+" 2>/dev/null || echo 4)
+if [ "$exit_code" = "0" ]; then
+  echo "Result: PASS (${diff}% ≤ ${threshold}%)"
+else
+  echo "Result: FAIL (${diff}% > ${threshold}%)"
+fi
+exit "$exit_code"

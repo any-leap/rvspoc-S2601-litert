@@ -48,13 +48,69 @@
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
+#include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/optimized/rvv_gemm_fp32.h"
 #include "tflite/kernels/internal/optimized/rvv_gemm_int8.h"
 #include "tflite/kernels/internal/optimized/rvv_gemm_uint8.h"
 
+#include <vector>
+
 namespace tflite {
 namespace cpu_backend_gemm {
 namespace detail {
+
+// Tiny threadpool tasks that drive the per-type RVV kernels in parallel
+// over the M dimension. Each task processes [m_start, m_end). Used by
+// the GemmImplUsingRvv specializations below when the caller requests
+// >1 thread (Copilot review #2 — RVV path was previously single-thread
+// regardless of CpuBackendContext::max_num_threads()).
+struct RvvGemmFp32Task : cpu_backend_threadpool::Task {
+  int m_chunk, n, k;
+  const float *lhs_data;
+  const float *rhs_chunk;
+  const float *bias_data;
+  float clamp_min, clamp_max;
+  float *dst_chunk;
+  void Run() override {
+    optimized_rvv::RvvGemmFp32(m_chunk, n, k, lhs_data, rhs_chunk, bias_data,
+                                clamp_min, clamp_max, dst_chunk);
+  }
+};
+
+struct RvvGemmInt8Task : cpu_backend_threadpool::Task {
+  int m_chunk, n, k;
+  const std::int8_t *lhs_data;
+  const std::int8_t *rhs_chunk;
+  int rhs_zp, dst_zp;
+  const std::int32_t *bias_data;
+  const std::int32_t *mul_pc;
+  const int *shift_pc;
+  std::int32_t clamp_min, clamp_max;
+  std::int8_t *dst_chunk;
+  void Run() override {
+    optimized_rvv::RvvGemmInt8PerChannel(
+        m_chunk, n, k, lhs_data, rhs_chunk, rhs_zp, dst_zp, bias_data,
+        mul_pc, shift_pc, clamp_min, clamp_max, dst_chunk);
+  }
+};
+
+struct RvvGemmUint8Task : cpu_backend_threadpool::Task {
+  int m_chunk, n, k;
+  const std::uint8_t *lhs_data;
+  int lhs_zp;
+  const std::uint8_t *rhs_chunk;
+  int rhs_zp, dst_zp;
+  const std::int32_t *bias_data;
+  std::int32_t multiplier_fp;
+  int shift;
+  std::int32_t clamp_min, clamp_max;
+  std::uint8_t *dst_chunk;
+  void Run() override {
+    optimized_rvv::RvvGemmUint8Uniform(
+        m_chunk, n, k, lhs_data, lhs_zp, rhs_chunk, rhs_zp, dst_zp,
+        bias_data, multiplier_fp, shift, clamp_min, clamp_max, dst_chunk);
+  }
+};
 
 // FP32 GEMM specialization. Falls back to ruy when matrix orientations
 // don't match the layouts emitted by optimized_ops::Conv (the only caller
@@ -99,10 +155,32 @@ struct GemmImplUsingRvv<float, float, float, float,
       return;
     }
 
-    optimized_rvv::RvvGemmFp32(
-        /*m=*/rhs_params.cols, /*n=*/lhs_params.rows,
-        /*k=*/lhs_params.cols, lhs_data, rhs_data, params.bias,
-        params.clamp_min, params.clamp_max, dst_data);
+    const int m = rhs_params.cols;
+    const int n = lhs_params.rows;
+    const int k = lhs_params.cols;
+    const int max_threads =
+        (context != nullptr) ? context->max_num_threads() : 1;
+    const int n_threads = std::min(max_threads, m);
+    if (n_threads <= 1) {
+      optimized_rvv::RvvGemmFp32(m, n, k, lhs_data, rhs_data, params.bias,
+                                  params.clamp_min, params.clamp_max,
+                                  dst_data);
+      return;
+    }
+    std::vector<RvvGemmFp32Task> tasks(n_threads);
+    for (int i = 0; i < n_threads; ++i) {
+      const int s = i * m / n_threads;
+      const int e = (i + 1) * m / n_threads;
+      auto& t = tasks[i];
+      t.m_chunk = e - s; t.n = n; t.k = k;
+      t.lhs_data = lhs_data;
+      t.rhs_chunk = rhs_data + s * k;
+      t.bias_data = params.bias;
+      t.clamp_min = params.clamp_min;
+      t.clamp_max = params.clamp_max;
+      t.dst_chunk = dst_data + s * n;
+    }
+    cpu_backend_threadpool::Execute(n_threads, tasks.data(), context);
   }
 };
 
@@ -139,15 +217,39 @@ struct GemmImplUsingRvv<std::int8_t, std::int8_t, std::int32_t, std::int8_t,
               params, context);
       return;
     }
-    optimized_rvv::RvvGemmInt8PerChannel(
-        /*m=*/rhs_params.cols, /*n=*/lhs_params.rows,
-        /*k=*/lhs_params.cols, lhs_data, rhs_data,
-        /*rhs_zp=*/rhs_params.zero_point,
-        /*dst_zp=*/dst_params.zero_point, params.bias,
-        params.multiplier_fixedpoint_perchannel,
-        params.multiplier_exponent_perchannel,
-        /*clamp_min=*/static_cast<int32_t>(params.clamp_min),
-        /*clamp_max=*/static_cast<int32_t>(params.clamp_max), dst_data);
+    const int m = rhs_params.cols;
+    const int n = lhs_params.rows;
+    const int k = lhs_params.cols;
+    const int max_threads =
+        (context != nullptr) ? context->max_num_threads() : 1;
+    const int n_threads = std::min(max_threads, m);
+    const int rhs_zp = rhs_params.zero_point;
+    const int dst_zp = dst_params.zero_point;
+    const int32_t cmin = static_cast<int32_t>(params.clamp_min);
+    const int32_t cmax = static_cast<int32_t>(params.clamp_max);
+    if (n_threads <= 1) {
+      optimized_rvv::RvvGemmInt8PerChannel(
+          m, n, k, lhs_data, rhs_data, rhs_zp, dst_zp, params.bias,
+          params.multiplier_fixedpoint_perchannel,
+          params.multiplier_exponent_perchannel, cmin, cmax, dst_data);
+      return;
+    }
+    std::vector<RvvGemmInt8Task> tasks(n_threads);
+    for (int i = 0; i < n_threads; ++i) {
+      const int s = i * m / n_threads;
+      const int e = (i + 1) * m / n_threads;
+      auto& t = tasks[i];
+      t.m_chunk = e - s; t.n = n; t.k = k;
+      t.lhs_data = lhs_data;
+      t.rhs_chunk = rhs_data + s * k;
+      t.rhs_zp = rhs_zp; t.dst_zp = dst_zp;
+      t.bias_data = params.bias;
+      t.mul_pc = params.multiplier_fixedpoint_perchannel;
+      t.shift_pc = params.multiplier_exponent_perchannel;
+      t.clamp_min = cmin; t.clamp_max = cmax;
+      t.dst_chunk = dst_data + s * n;
+    }
+    cpu_backend_threadpool::Execute(n_threads, tasks.data(), context);
   }
 };
 
@@ -182,15 +284,40 @@ struct GemmImplUsingRvv<std::uint8_t, std::uint8_t, std::int32_t,
               params, context);
       return;
     }
-    optimized_rvv::RvvGemmUint8Uniform(
-        /*m=*/rhs_params.cols, /*n=*/lhs_params.rows,
-        /*k=*/lhs_params.cols, lhs_data,
-        /*lhs_zp=*/lhs_params.zero_point, rhs_data,
-        /*rhs_zp=*/rhs_params.zero_point,
-        /*dst_zp=*/dst_params.zero_point, params.bias,
-        params.multiplier_fixedpoint, params.multiplier_exponent,
-        /*clamp_min=*/static_cast<int32_t>(params.clamp_min),
-        /*clamp_max=*/static_cast<int32_t>(params.clamp_max), dst_data);
+    const int m = rhs_params.cols;
+    const int n = lhs_params.rows;
+    const int k = lhs_params.cols;
+    const int max_threads =
+        (context != nullptr) ? context->max_num_threads() : 1;
+    const int n_threads = std::min(max_threads, m);
+    const int lhs_zp = lhs_params.zero_point;
+    const int rhs_zp = rhs_params.zero_point;
+    const int dst_zp = dst_params.zero_point;
+    const int32_t cmin = static_cast<int32_t>(params.clamp_min);
+    const int32_t cmax = static_cast<int32_t>(params.clamp_max);
+    if (n_threads <= 1) {
+      optimized_rvv::RvvGemmUint8Uniform(
+          m, n, k, lhs_data, lhs_zp, rhs_data, rhs_zp, dst_zp, params.bias,
+          params.multiplier_fixedpoint, params.multiplier_exponent, cmin,
+          cmax, dst_data);
+      return;
+    }
+    std::vector<RvvGemmUint8Task> tasks(n_threads);
+    for (int i = 0; i < n_threads; ++i) {
+      const int s = i * m / n_threads;
+      const int e = (i + 1) * m / n_threads;
+      auto& t = tasks[i];
+      t.m_chunk = e - s; t.n = n; t.k = k;
+      t.lhs_data = lhs_data; t.lhs_zp = lhs_zp;
+      t.rhs_chunk = rhs_data + s * k;
+      t.rhs_zp = rhs_zp; t.dst_zp = dst_zp;
+      t.bias_data = params.bias;
+      t.multiplier_fp = params.multiplier_fixedpoint;
+      t.shift = params.multiplier_exponent;
+      t.clamp_min = cmin; t.clamp_max = cmax;
+      t.dst_chunk = dst_data + s * n;
+    }
+    cpu_backend_threadpool::Execute(n_threads, tasks.data(), context);
   }
 };
 
