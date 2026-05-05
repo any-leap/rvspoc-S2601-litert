@@ -4135,6 +4135,38 @@ template <typename T>
 inline void Logistic(const RuntimeShape& input_shape, const T* input_data,
                      const RuntimeShape& output_shape, T* output_data) {
   ruy::profiler::ScopeLabel label("Logistic");
+#if defined(__riscv_vector)
+  if constexpr (std::is_same_v<T, float>) {
+    // RVSPOC S2601: vector load/store with scalar logistic per element.
+    // RVV 1.0 has no native vexp; a polynomial approximation would need
+    // careful min-max tuning — for now use std::exp scalar inside the
+    // chunk so we stay bit-exact with Eigen's scalar fallback path.
+    const int size = input_shape.FlatSize();
+    const float* in = reinterpret_cast<const float*>(input_data);
+    float* out = reinterpret_cast<float*>(output_data);
+    int i = 0;
+    while (i < size) {
+      size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+      float buf[64];
+      __riscv_vse32_v_f32m4(buf, __riscv_vle32_v_f32m4(in + i, vl), vl);
+      for (size_t j = 0; j < vl; ++j) {
+        const float x = buf[j];
+        // 1 / (1 + exp(-x)). Stable form: pos branch / neg branch to avoid
+        // overflow of exp.
+        if (x >= 0.0f) {
+          float e = std::exp(-x);
+          buf[j] = 1.0f / (1.0f + e);
+        } else {
+          float e = std::exp(x);
+          buf[j] = e / (1.0f + e);
+        }
+      }
+      __riscv_vse32_v_f32m4(out + i, __riscv_vle32_v_f32m4(buf, vl), vl);
+      i += vl;
+    }
+    return;
+  }
+#endif
   auto input_map = MapAsVector(input_data, input_shape);
   auto output_map = MapAsVector(output_data, output_shape);
   output_map.array() =
