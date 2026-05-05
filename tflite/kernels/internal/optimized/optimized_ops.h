@@ -1824,6 +1824,19 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
   }
 #endif  // NEON
 
+  // RVSPOC S2601: scalar broadcast add + clamp.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vfloat32m4_t v_in = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t v_out = __riscv_vfadd_vf_f32m4(v_in, broadcast_value, vl);
+    v_out = __riscv_vfmax_vf_f32m4(v_out, params.float_activation_min, vl);
+    v_out = __riscv_vfmin_vf_f32m4(v_out, params.float_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, v_out, vl);
+    i += vl;
+  }
+#endif
+
   for (; i < size; ++i) {
     auto x = broadcast_value + input2_data[i];
     output_data[i] = ActivationFunctionWithMinMax(
