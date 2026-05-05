@@ -476,8 +476,9 @@
   |---|---|---|---|---|---|
   | MobileNetV1 FP32 | 66.50% (133/200) | 66.50% (133/200) | **0.0%** | ≤ 0.1% | ✅ |
   | MobileNetV1 INT8 (uint8 per-tensor) | 67.00% (134/200) | 66.50% (133/200) | **0.5%** | ≤ 1.0% | ✅ |
-  | MobileNetV2 FP32 | (running) | | | ≤ 0.1% | |
-  | MobileNetV2 INT8 | (queued) | | | ≤ 1.0% | |
+  | MobileNetV2 FP32 | 68.50% (137/200) | 68.50% (137/200) | **0.0%** | ≤ 0.1% | ✅ |
+  | MobileNetV2 INT8 (uint8 per-tensor) | 70.00% (140/200) | 70.50% (141/200) | **0.5%** | ≤ 1.0% | ✅ |
+  | EfficientDet-Lite0 INT8 | (检测模型，Top-1 不适用，需 mAP) | | | | n/a |
 
 - 解读：
   - FP32 完全相等：vfmacc 累加顺序与 scalar `acc += a*b` 落到同样的 IEEE 表示（FIND-007 也观测到）
