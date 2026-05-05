@@ -1401,10 +1401,23 @@ inline void SpaceToDepth(const tflite::SpaceToDepthParams& op_params,
 inline void Relu(const RuntimeShape& input_shape, const float* input_data,
                  const RuntimeShape& output_shape, float* output_data) {
   ruy::profiler::ScopeLabel label("Relu (not fused)");
-
+#if defined(__riscv_vector)
+  // RVSPOC S2601: explicit RVV path. Eigen has no RVV backend; without
+  // this it falls through to Eigen's scalar loop on RV64GCV.
+  const int size = input_shape.FlatSize();
+  int i = 0;
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vfloat32m4_t v = __riscv_vle32_v_f32m4(input_data + i, vl);
+    v = __riscv_vfmax_vf_f32m4(v, 0.0f, vl);
+    __riscv_vse32_v_f32m4(output_data + i, v, vl);
+    i += vl;
+  }
+#else
   const auto input = MapAsVector(input_data, input_shape);
   auto output = MapAsVector(output_data, output_shape);
   output = input.cwiseMax(0.0f);
+#endif
 }
 
 inline void L2Normalization(const tflite::L2NormalizationParams& op_params,
@@ -1516,6 +1529,20 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
     vst1q_f32(output_data + i, x);
   }
 #endif  // NEON
+
+  // RVSPOC S2601: vector add + clamp; vsetvl handles tail.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vfloat32m4_t a = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t b = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfadd_vv_f32m4(a, b, vl);
+    x = __riscv_vfmax_vf_f32m4(x, params.float_activation_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, params.float_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
+#endif
 
   for (; i < size; i++) {
     auto x = input1_data[i] + input2_data[i];
@@ -1942,6 +1969,20 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
     vst1q_f32(output_data + i, x);
   }
 #endif  // NEON
+
+  // RVSPOC S2601: vector mul + clamp.
+#ifdef USE_RVV
+  while (i < size) {
+    size_t vl = __riscv_vsetvl_e32m4(static_cast<size_t>(size - i));
+    vfloat32m4_t a = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t b = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfmul_vv_f32m4(a, b, vl);
+    x = __riscv_vfmax_vf_f32m4(x, output_activation_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, output_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
+#endif
 
   for (; i < size; i++) {
     auto x = input1_data[i] * input2_data[i];
@@ -3124,6 +3165,23 @@ inline bool AveragePool(const PoolParams& params,
                 }
               }
 #endif
+              // RVSPOC S2601: u8 → u32 widen and accumulate.
+#ifdef USE_RVV
+              while (channel < tranche_depth) {
+                size_t vl = __riscv_vsetvl_e32m4(
+                    static_cast<size_t>(tranche_depth - channel));
+                vuint8m1_t v_in_u8 =
+                    __riscv_vle8_v_u8m1(input_channel_ptr, vl);
+                vuint32m4_t v_in_u32 =
+                    __riscv_vzext_vf4_u32m4(v_in_u8, vl);
+                vuint32m4_t v_acc =
+                    __riscv_vle32_v_u32m4(acc + channel, vl);
+                v_acc = __riscv_vadd_vv_u32m4(v_acc, v_in_u32, vl);
+                __riscv_vse32_v_u32m4(acc + channel, v_acc, vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
+#endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] += *input_channel_ptr++;
               }
@@ -3302,6 +3360,21 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 vst1_u8(acc + channel, acc_reg);
               }
 #endif
+              // RVSPOC S2601: u8 vector max-reduce.
+#ifdef USE_RVV
+              while (channel < tranche_depth) {
+                size_t vl = __riscv_vsetvl_e8m4(
+                    static_cast<size_t>(tranche_depth - channel));
+                vuint8m4_t v_acc =
+                    __riscv_vle8_v_u8m4(acc + channel, vl);
+                vuint8m4_t v_in =
+                    __riscv_vle8_v_u8m4(input_channel_ptr, vl);
+                v_acc = __riscv_vmaxu_vv_u8m4(v_acc, v_in, vl);
+                __riscv_vse8_v_u8m4(acc + channel, v_acc, vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
+#endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
               }
@@ -3323,6 +3396,18 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmin_u8(a, vdup_n_u8(params.quantized_activation_max));
             a = vmax_u8(a, vdup_n_u8(params.quantized_activation_min));
             vst1_u8(output_ptr + channel, a);
+          }
+#endif
+          // RVSPOC S2601: u8 vector clamp + store.
+#ifdef USE_RVV
+          while (channel < tranche_depth) {
+            size_t vl = __riscv_vsetvl_e8m4(
+                static_cast<size_t>(tranche_depth - channel));
+            vuint8m4_t a = __riscv_vle8_v_u8m4(acc + channel, vl);
+            a = __riscv_vminu_vx_u8m4(a, params.quantized_activation_max, vl);
+            a = __riscv_vmaxu_vx_u8m4(a, params.quantized_activation_min, vl);
+            __riscv_vse8_v_u8m4(output_ptr + channel, a, vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
